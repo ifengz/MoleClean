@@ -29,7 +29,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     }
 }
 
-
 struct MolePanelGroupBoxStyle: GroupBoxStyle {
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 14) {

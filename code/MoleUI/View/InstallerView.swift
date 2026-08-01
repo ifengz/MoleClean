@@ -10,7 +10,9 @@ struct InstallerView: View {
     }
 
     private var filteredFiles: [InstallerFile] {
-        if searchText.isEmpty { return service.files }
+        if searchText.isEmpty {
+            return service.files
+        }
         return service.files.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
 

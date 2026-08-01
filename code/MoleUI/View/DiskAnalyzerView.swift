@@ -227,7 +227,11 @@ struct DiskAnalyzerView: View {
             "Move to Trash?",
             isPresented: Binding(
                 get: { entryToDelete != nil },
-                set: { if !$0 { entryToDelete = nil } }
+                set: {
+                    if !$0 {
+                        entryToDelete = nil
+                    }
+                }
             )
         ) {
             Button("Cancel", role: .cancel) {

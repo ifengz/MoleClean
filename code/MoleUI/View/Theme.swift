@@ -36,10 +36,24 @@ enum MoleTheme {
 
     // MARK: Legacy Aliases
 
-    // Keeps upstream callers that reference the old green palette compiling.
-    static var pine: Color { primary }
-    static var pineDeep: Color { primaryDark }
-    static var moss: Color { primaryDark }
-    static var meadow: Color { primaryLight }
-    static var sky: Color { primary }
+    /// Keeps upstream callers that reference the old green palette compiling.
+    static var pine: Color {
+        primary
+    }
+
+    static var pineDeep: Color {
+        primaryDark
+    }
+
+    static var moss: Color {
+        primaryDark
+    }
+
+    static var meadow: Color {
+        primaryLight
+    }
+
+    static var sky: Color {
+        primary
+    }
 }

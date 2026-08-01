@@ -100,9 +100,15 @@ struct UsageBar: View {
     }
 
     private var barColor: Color {
-        guard autoThreshold else { return color }
-        if percent >= 85 { return .red }
-        if percent >= 60 { return .yellow }
+        guard autoThreshold else {
+            return color
+        }
+        if percent >= 85 {
+            return .red
+        }
+        if percent >= 60 {
+            return .yellow
+        }
         return color
     }
 
@@ -144,7 +150,9 @@ struct MiniSparklineView: View {
         let maxVal = padded.max().flatMap { $0 > 0 ? $0 : nil } ?? 1
         let sparkline: String = padded.map { val in
             // Always show baseline (▁), even when there's traffic
-            if val <= 0 { return blocks[0] }
+            if val <= 0 {
+                return blocks[0]
+            }
             let idx = Int((val / maxVal) * Double(blocks.count - 1))
             return blocks[max(1, min(idx, blocks.count - 1))]
         }.joined()

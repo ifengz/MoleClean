@@ -157,7 +157,11 @@ struct UninstallView: View {
                 Toggle(isOn: Binding(
                     get: { isSelected },
                     set: { checked in
-                        if checked { selectedApps.insert(app.id) } else { selectedApps.remove(app.id) }
+                        if checked {
+                            selectedApps.insert(app.id)
+                        } else {
+                            selectedApps.remove(app.id)
+                        }
                     }
                 )) {
                     EmptyView()

@@ -328,9 +328,13 @@ final class MetricsModel {
             let str = try decoder.singleValueContainer().decode(String.self)
             let fmt = ISO8601DateFormatter()
             fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = fmt.date(from: str) { return date }
+            if let date = fmt.date(from: str) {
+                return date
+            }
             fmt.formatOptions = [.withInternetDateTime]
-            if let date = fmt.date(from: str) { return date }
+            if let date = fmt.date(from: str) {
+                return date
+            }
             throw DecodingError.dataCorrupted(
                 .init(
                     codingPath: decoder.codingPath,

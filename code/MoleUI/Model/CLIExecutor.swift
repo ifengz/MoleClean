@@ -244,7 +244,9 @@ final class CLIExecutor {
 
             while !Task.isCancelled {
                 let chunk = handle.availableData
-                if chunk.isEmpty { break }
+                if chunk.isEmpty {
+                    break
+                }
 
                 buffer.append(chunk)
 
@@ -413,12 +415,18 @@ extension CLIExecutor {
             NSHomeDirectory() + "/.config/mole/mole",
         ]
         for path in candidates {
-            guard fm.isExecutableFile(atPath: path) else { continue }
+            guard fm.isExecutableFile(atPath: path) else {
+                continue
+            }
             let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
             let parent = resolved.deletingLastPathComponent()
-            if fm.fileExists(atPath: parent.appendingPathComponent("lib").path) { return parent }
+            if fm.fileExists(atPath: parent.appendingPathComponent("lib").path) {
+                return parent
+            }
             let libexec = parent.deletingLastPathComponent().appendingPathComponent("libexec")
-            if fm.fileExists(atPath: libexec.appendingPathComponent("lib").path) { return libexec }
+            if fm.fileExists(atPath: libexec.appendingPathComponent("lib").path) {
+                return libexec
+            }
         }
         return nil
     }
