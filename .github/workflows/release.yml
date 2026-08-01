@@ -34,7 +34,7 @@ jobs:
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=MoleUI-${VERSION}.dmg" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=MoleClean-${VERSION}.dmg" >> "$GITHUB_OUTPUT"
 
       - name: Detect signing credentials
         id: signing
@@ -178,26 +178,26 @@ jobs:
             --icon-size 100 \
             --icon "$PRODUCT_NAME.app" 150 185 \
             --app-drop-link 450 185 \
-            "$RUNNER_TEMP/MoleUI.dmg" \
+            "$RUNNER_TEMP/MoleClean.dmg" \
             "$RUNNER_TEMP/export/"
 
       - name: Rename DMG with version
         run: |
           VERSION="${{ steps.release_meta.outputs.version }}"
-          cp "$RUNNER_TEMP/MoleUI.dmg" "$RUNNER_TEMP/MoleUI-${VERSION}.dmg"
+          cp "$RUNNER_TEMP/MoleClean.dmg" "$RUNNER_TEMP/MoleClean-${VERSION}.dmg"
 
       - name: Upload build artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.release_meta.outputs.artifact_name }}
-          path: ${{ runner.temp }}/MoleUI-${{ steps.release_meta.outputs.version }}.dmg
+          path: ${{ runner.temp }}/MoleClean-${{ steps.release_meta.outputs.version }}.dmg
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/') && steps.signing.outputs.enabled == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ runner.temp }}/MoleUI-*.dmg
+          files: ${{ runner.temp }}/MoleClean-*.dmg
           generate_release_notes: true
 
       - name: Cleanup keychain

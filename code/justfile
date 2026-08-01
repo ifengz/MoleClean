@@ -71,14 +71,14 @@ package: build-release
         --icon-size 100 \
         --icon "{{app_name}}.app" 150 185 \
         --app-drop-link 450 185 \
-        dist/MoleUI.dmg \
+        dist/MoleClean.dmg \
         build/"{{app_name}}".xcarchive/Products/Applications/ || true
 
 sign-and-notarize: package
     codesign --force --deep --timestamp --options runtime \
         --sign "Developer ID Application: Fuyao Qin (646VSJ9K5F)" \
-        dist/MoleUI.dmg
-    xcrun notarytool submit dist/MoleUI.dmg \
+        dist/MoleClean.dmg
+    xcrun notarytool submit dist/MoleClean.dmg \
         --keychain-profile "notary-profile" \
         --wait
 
