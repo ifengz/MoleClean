@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import Mole_UI
+@testable import Mole_Clean
 
 // MARK: - Version
 
