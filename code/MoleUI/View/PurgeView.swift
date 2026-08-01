@@ -250,7 +250,7 @@ struct PurgePathsEditorView: View {
                     Text("Edit Scan Paths")
                         .font(.system(size: 24, weight: .bold))
 
-                    Text("One path per line. Mole UI merges these with the built-in defaults before each purge scan.")
+                    Text("One path per line. Mole Clean merges these with the built-in defaults before each purge scan.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

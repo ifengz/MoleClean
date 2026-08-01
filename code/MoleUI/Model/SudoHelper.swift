@@ -6,7 +6,7 @@ import Foundation
 enum SudoHelper {
     @MainActor
     static func requestSudoAccess(
-        reason: String = "Mole UI needs administrator access to continue."
+        reason: String = "Mole Clean needs administrator access to continue."
     ) async -> Bool {
         if hasCachedSudoAccess() {
             return true
@@ -18,7 +18,7 @@ enum SudoHelper {
     @MainActor
     static func runWithAdmin(
         _ command: String,
-        reason: String = "Mole UI needs administrator access to continue."
+        reason: String = "Mole Clean needs administrator access to continue."
     ) async throws -> String {
         guard await requestSudoAccess(reason: reason) else {
             throw NSError(

@@ -22,9 +22,9 @@ enum FullDiskAccessStatus: Equatable {
         case .granted:
             "Broad disk scans should be able to inspect protected Library content without repeated folder-by-folder interruptions."
         case .notGranted:
-            "macOS does not provide a one-shot prompt for Full Disk Access. Mole UI can guide you to the correct System Settings page so you can enable it yourself."
+            "macOS does not provide a one-shot prompt for Full Disk Access. Mole Clean can guide you to the correct System Settings page so you can enable it yourself."
         case .unknown:
-            "Mole UI could not positively verify Full Disk Access yet. Refresh after changing System Settings, or try Disk Analyzer again."
+            "Mole Clean could not positively verify Full Disk Access yet. Refresh after changing System Settings, or try Disk Analyzer again."
         }
     }
 }

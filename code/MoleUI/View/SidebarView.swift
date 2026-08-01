@@ -29,7 +29,7 @@ struct SidebarView: View {
                 .foregroundStyle(MoleTheme.primary)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Mole UI")
+                Text("Mole Clean")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundStyle(MoleTheme.ink)
 

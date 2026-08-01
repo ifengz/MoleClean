@@ -248,7 +248,7 @@ struct MoleHeroPanel<Accessory: View>: View {
 
 struct MoleDetailBackgroundModifier: ViewModifier {
     func body(content: Content) -> some View {
-        content.background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        content.background(Color.white.ignoresSafeArea())
     }
 }
 

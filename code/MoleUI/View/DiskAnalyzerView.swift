@@ -1,6 +1,16 @@
 import AppKit
 import SwiftUI
 
+private struct NavIconButtonStyle: ButtonStyle {
+    var isHovered: Bool = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.88 : (isHovered ? 1.06 : 1.0))
+            .animation(.spring(response: 0.18, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
 struct DiskAnalyzerView: View {
     @Environment(DiskModel.self) var scanner
     @State private var hasInitialScan = false
@@ -9,6 +19,9 @@ struct DiskAnalyzerView: View {
     @State private var pendingPermissionDirectory: URL?
     @State private var needsFullDiskAccessPrompt = false
     @State private var fullDiskAccessStatus = FullDiskAccessHelper.status()
+    @State private var hoverBack = false
+    @State private var hoverHome = false
+    @State private var hoverRefresh = false
 
     private var filteredEntries: [DirEntry] {
         let entries = showHiddenFiles
@@ -70,11 +83,13 @@ struct DiskAnalyzerView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 14, weight: .semibold))
                     .frame(width: 28, height: 28)
-                    .background(MoleTheme.primaryLight)
+                    .background(hoverBack ? MoleTheme.primary.opacity(0.18) : MoleTheme.primaryLight)
+                    .animation(.easeInOut(duration: 0.14), value: hoverBack)
                     .clipShape(RoundedRectangle(cornerRadius: MoleTheme.radiusSm))
             }
             .disabled(scanner.pathStack.isEmpty)
-            .buttonStyle(.borderless)
+            .buttonStyle(NavIconButtonStyle(isHovered: hoverBack))
+            .onHover { hoverBack = $0 }
 
             Button {
                 scanner.navigateToRoot()
@@ -82,10 +97,12 @@ struct DiskAnalyzerView: View {
                 Image(systemName: "house.fill")
                     .font(.system(size: 12))
                     .frame(width: 28, height: 28)
-                    .background(MoleTheme.primaryLight)
+                    .background(hoverHome ? MoleTheme.primary.opacity(0.18) : MoleTheme.primaryLight)
+                    .animation(.easeInOut(duration: 0.14), value: hoverHome)
                     .clipShape(RoundedRectangle(cornerRadius: MoleTheme.radiusSm))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(NavIconButtonStyle(isHovered: hoverHome))
+            .onHover { hoverHome = $0 }
 
             breadcrumbPath
 
@@ -103,10 +120,12 @@ struct DiskAnalyzerView: View {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 12))
                     .frame(width: 28, height: 28)
-                    .background(MoleTheme.primaryLight)
+                    .background(hoverRefresh ? MoleTheme.primary.opacity(0.18) : MoleTheme.primaryLight)
+                    .animation(.easeInOut(duration: 0.14), value: hoverRefresh)
                     .clipShape(RoundedRectangle(cornerRadius: MoleTheme.radiusSm))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(NavIconButtonStyle(isHovered: hoverRefresh))
+            .onHover { hoverRefresh = $0 }
             .disabled(scanner.isScanning)
 
             Text(MetricsFormatter.humanBytes(scanner.totalSize))
@@ -380,11 +399,11 @@ struct DiskAnalyzerView: View {
     private var fullDiskAccessPromptDetail: String {
         switch fullDiskAccessStatus {
         case .granted:
-            "Mole UI now appears to have Full Disk Access. You can continue the Home-folder scan."
+            "Mole Clean now appears to have Full Disk Access. You can continue the Home-folder scan."
         case .notGranted:
             "Scanning your Home folder without Full Disk Access causes macOS to interrupt the scan with separate folder prompts. Enable it first for a cleaner disk scan."
         case .unknown:
-            "Mole UI could not positively verify Full Disk Access yet. If you just enabled it, click Check Again once before continuing."
+            "Mole Clean could not positively verify Full Disk Access yet. If you just enabled it, click Check Again once before continuing."
         }
     }
 

@@ -96,7 +96,7 @@ final class CLIExecutor {
 
         // Set working directory to mole root and execute
         // This ensures SCRIPT_DIR is correctly resolved in mole scripts
-        // Quote the path to handle spaces in "Mole UI.app"
+        // Quote the path to handle spaces in "Mole Clean.app"
         var command = "cd '\(moleRoot.path)' && '\(molePath)' \(subcommand)"
         let forceDryRun = options.dryRun || ProcessInfo.processInfo.arguments.contains("UI_TESTING")
         if forceDryRun {

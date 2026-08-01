@@ -19,8 +19,8 @@ enum MoleTheme {
 
     static let ink = Color.primary
     static let line = Color.primary.opacity(0.10)
-    static let parchment = Color(nsColor: .windowBackgroundColor)
-    static let sand = Color(nsColor: .underPageBackgroundColor)
+    static let parchment = Color.white
+    static let sand = Color(red: 0.95, green: 0.955, blue: 1.0)
 
     // MARK: Semantic
 

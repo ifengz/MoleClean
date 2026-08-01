@@ -32,7 +32,7 @@ struct MoleVersionView: View {
 
             HStack(spacing: 12) {
                 versionChip(
-                    title: "Mole UI",
+                    title: "Mole Clean",
                     value: versionChecker.currentVersion ?? "Unknown",
                     systemImage: "app.badge.fill",
                     tint: MoleTheme.primary
@@ -73,7 +73,7 @@ struct MoleVersionView: View {
                             .font(.caption)
                     }
                 } else {
-                    Text("This build is already on the latest published Mole UI release.")
+                    Text("This build is already on the latest published Mole Clean release.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
