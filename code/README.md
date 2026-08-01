@@ -2,9 +2,17 @@
 
 > **⚠️ Early Development** — This project is in active development and has not been extensively tested. Use Dry Run mode for cleanup operations and please [report any issues](https://github.com/imnotnoahhh/MoleUI/issues).
 
-Native macOS GUI for [Mole](https://github.com/tw93/Mole). Built with SwiftUI, with Mole Go+Shell as the core kernel.
+Native macOS GUI for [Mole](https://github.com/tw93/Mole). Built with SwiftUI, with the upstream Mole CLI as the core kernel.
 
-![screenshot](./Resources/screenshot.png)
+## Screenshots
+
+![Mole Clean status](./Resources/screenshots/mole-clean-status.png)
+
+![Mole Clean settings](./Resources/screenshots/mole-clean-settings.png)
+
+![Mole Clean clean](./Resources/screenshots/mole-clean-clean.png)
+
+![Mole Clean optimize](./Resources/screenshots/mole-clean-optimize.png)
 
 ## 📚 Documentation
 
@@ -120,6 +128,8 @@ MoleUI implements a complete auto-update workflow that automatically detects, va
 - Version number synchronization
 - User-facing update notifications
 
+Mole Clean will continue to follow official Mole CLI releases. Each upstream release is fetched, compatibility-checked, bundled, and validated by CI before it is shipped in a new Mole Clean release. Updating the upstream CLI does not change an installed app until that new Mole Clean release is built and installed.
+
 ## Architecture
 
 MV (Model-View) architecture with Swift's `@Observable` macro, acting primarily as a UI wrapper over the Mole CLI, with native bridging for JSON parsing and file system operations:
@@ -162,7 +172,8 @@ MoleUI/
 
 ## Credits
 
-- [tw93/Mole](https://github.com/tw93/Mole) — Original CLI tool, Mole Clean is based on this project
+- [noah-qin/MoleUI](https://github.com/noah-qin/MoleUI) — Open-source SwiftUI GUI foundation that this project extends and redesigns
+- [tw93/Mole](https://github.com/tw93/Mole) — Open-source CLI engine for system cleanup and maintenance
 - Built with SwiftUI + NavigationSplitView for native macOS experience
 
 ## Troubleshooting
