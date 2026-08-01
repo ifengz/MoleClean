@@ -29,22 +29,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     }
 }
 
-enum MoleTheme {
-    static let pine = Color(red: 0.15, green: 0.39, blue: 0.31)
-    static let pineDeep = Color(red: 0.10, green: 0.24, blue: 0.20)
-    static let moss = Color(red: 0.35, green: 0.57, blue: 0.41)
-    static let meadow = Color.accentColor.opacity(0.16)
-    static let parchment = Color(nsColor: .windowBackgroundColor)
-    static let sand = Color(nsColor: .underPageBackgroundColor)
-    static let ember = Color(red: 0.82, green: 0.39, blue: 0.27)
-    static let sky = Color(red: 0.31, green: 0.53, blue: 0.73)
-    static let ink = Color.primary
-    static let line = Color.primary.opacity(0.10)
-}
 
 struct MolePanelGroupBoxStyle: GroupBoxStyle {
-    @Environment(\.colorScheme) private var colorScheme
-
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             configuration.label
@@ -54,19 +40,11 @@ struct MolePanelGroupBoxStyle: GroupBoxStyle {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(18)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(.regularMaterial)
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.white.opacity(0.20))
-            }
-        )
+        .background(MoleTheme.parchment, in: RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
                 .stroke(MoleTheme.line, lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.20 : 0.06), radius: 18, y: 8)
     }
 }
 
@@ -85,9 +63,9 @@ struct MoleSectionHeader: View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(MoleTheme.pine)
+                .foregroundStyle(MoleTheme.primary)
                 .frame(width: 30, height: 30)
-                .background(MoleTheme.meadow.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(MoleTheme.primaryLight, in: RoundedRectangle(cornerRadius: MoleTheme.radiusSm, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
@@ -109,7 +87,7 @@ struct MoleMetricBadge: View {
     let title: String
     let value: String
     let systemImage: String
-    var tint: Color = MoleTheme.pine
+    var tint: Color = MoleTheme.primary
 
     var body: some View {
         HStack(spacing: 10) {
@@ -117,7 +95,7 @@ struct MoleMetricBadge: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 26, height: 26)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: MoleTheme.radiusSm, style: .continuous))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title.uppercased())
@@ -130,9 +108,9 @@ struct MoleMetricBadge: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(MoleTheme.parchment, in: RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
                 .stroke(tint.opacity(0.20), lineWidth: 1)
         )
     }
@@ -152,11 +130,11 @@ struct MoleSearchField: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.thinMaterial)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
+                .fill(MoleTheme.parchment)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
                 .stroke(MoleTheme.line, lineWidth: 1)
         )
     }
@@ -187,8 +165,6 @@ struct MoleLoadingState: View {
 }
 
 struct MoleHeroPanel<Accessory: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     let eyebrow: String
     let title: String
     let subtitle: String
@@ -229,24 +205,20 @@ struct MoleHeroPanel<Accessory: View>: View {
                     Text(eyebrow.uppercased())
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .tracking(0.8)
-                        .foregroundStyle(MoleTheme.pine)
+                        .foregroundStyle(MoleTheme.primary)
                     Capsule()
-                        .fill(MoleTheme.meadow)
+                        .fill(MoleTheme.primaryLight)
                         .frame(width: 28, height: 6)
                 }
 
                 HStack(alignment: .top, spacing: 14) {
                     Image(systemName: symbol)
                         .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(MoleTheme.pineDeep)
+                        .foregroundStyle(MoleTheme.primaryDark)
                         .frame(width: 44, height: 44)
                         .background(
-                            LinearGradient(
-                                colors: [MoleTheme.sand, MoleTheme.meadow],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            MoleTheme.primaryLight,
+                            in: RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
                         )
 
                     VStack(alignment: .leading, spacing: 6) {
@@ -267,53 +239,17 @@ struct MoleHeroPanel<Accessory: View>: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(22)
-        .background {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.regularMaterial)
-        }
-        .overlay {
-            ZStack {
-                LinearGradient(
-                    colors: [
-                        colorScheme == .dark ? Color.white.opacity(0.05) : Color.white.opacity(0.22),
-                        Color.clear,
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottom
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .stroke(MoleTheme.line, lineWidth: 1)
-            }
-            .allowsHitTesting(false) // Allow clicks to pass through
-        }
-        .shadow(color: MoleTheme.pine.opacity(0.08), radius: 22, y: 10)
+        .background(MoleTheme.parchment, in: RoundedRectangle(cornerRadius: MoleTheme.radiusLg, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: MoleTheme.radiusLg, style: .continuous)
+                .stroke(MoleTheme.line, lineWidth: 1)
+        )
     }
 }
 
 struct MoleDetailBackgroundModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-
     func body(content: Content) -> some View {
-        content.background(
-            ZStack {
-                Color(nsColor: .windowBackgroundColor)
-
-                Circle()
-                    .fill(MoleTheme.sand.opacity(colorScheme == .dark ? 0.22 : 0.55))
-                    .frame(width: 360)
-                    .blur(radius: 80)
-                    .offset(x: 260, y: -220)
-
-                Circle()
-                    .fill(MoleTheme.meadow.opacity(colorScheme == .dark ? 0.18 : 0.30))
-                    .frame(width: 280)
-                    .blur(radius: 70)
-                    .offset(x: -300, y: 180)
-            }
-            .ignoresSafeArea()
-        )
+        content.background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
     }
 }
 
@@ -363,7 +299,7 @@ struct ContentView: View {
             VStack(spacing: 16) {
                 Image(systemName: "rectangle.stack.badge.person.crop")
                     .font(.system(size: 34))
-                    .foregroundStyle(MoleTheme.pine)
+                    .foregroundStyle(MoleTheme.primary)
                 Text("Pick a workspace lane from the sidebar")
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                 Text("Status, cleanup, uninstall, and privacy tools all live there.")

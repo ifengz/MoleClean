@@ -27,7 +27,7 @@ struct MoleApp: App {
                 .environment(safetyController)
                 .environment(versionModel)
                 .groupBoxStyle(MolePanelGroupBoxStyle())
-                .tint(Color(red: 0.16, green: 0.48, blue: 0.36))
+                .tint(MoleTheme.primary)
                 .frame(minWidth: 980, minHeight: 700)
                 .onAppear {
                     // Wire up model references for metrics pause coordination

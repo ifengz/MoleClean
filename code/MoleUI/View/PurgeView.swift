@@ -237,9 +237,9 @@ struct PurgePathsEditorView: View {
             HStack(alignment: .top, spacing: 16) {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(MoleTheme.primary)
                     .frame(width: 48, height: 48)
-                    .background(Color.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                    .background(MoleTheme.primaryLight, in: RoundedRectangle(cornerRadius: MoleTheme.radiusMd))
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("PROJECTS")

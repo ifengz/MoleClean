@@ -240,7 +240,7 @@ struct DashboardView: View {
                     title: "Uptime",
                     value: snap.uptime,
                     systemImage: "clock.arrow.circlepath",
-                    tint: MoleTheme.sky
+                    tint: MoleTheme.primary
                 )
             }
         }

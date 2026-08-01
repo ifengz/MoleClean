@@ -30,6 +30,7 @@
 		B67F824EB3C3D06706C9EB76 /* MoleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA83B140E1CA8258B27D0DB7 /* MoleApp.swift */; };
 		BCBFFF98F7FF20357C08067B /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D318DDC275BE6B3CD128F65C /* ContentView.swift */; };
 		D455E75FE1409E6AB1A61E12 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61CA9DDCC7B13D144300AD0C /* SidebarView.swift */; };
+		A1F5C0DE00000000000000A2 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F5C0DE00000000000000A1 /* Theme.swift */; };
 		E7B5322A3242D44AE9DF7526 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 24C213975ADB4EC643F4BF9D /* Assets.xcassets */; };
 		F32A25D13722F0BA914A232D /* ErrorTranslator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BE3A3CCA1B2FB0C00DAD376 /* ErrorTranslator.swift */; };
 		F4589CC8DAEFA56B33CD550D /* OptimizeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E44E1B7E83866D954771C6A2 /* OptimizeView.swift */; };
@@ -58,6 +59,7 @@
 		5F0FC8E2671003B8A9BAAD02 /* CLIExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIExecutor.swift; sourceTree = "<group>"; };
 		5FE38323311E805E1A7FC867 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		61CA9DDCC7B13D144300AD0C /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		A1F5C0DE00000000000000A1 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		8B5D757BF68A417AB45A5E9F /* SafetyController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyController.swift; sourceTree = "<group>"; };
 		A5E18C42B31B1A28D0F001B8 /* BundledBinaries.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BundledBinaries.entitlements; sourceTree = "<group>"; };
 		BB11111111111111BBBBBBBB /* CleanModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanModel.swift; sourceTree = "<group>"; };
@@ -104,6 +106,7 @@
 				5A4F3BB22047802058591BBF /* PurgeView.swift */,
 				5FE38323311E805E1A7FC867 /* SettingsView.swift */,
 				61CA9DDCC7B13D144300AD0C /* SidebarView.swift */,
+				A1F5C0DE00000000000000A1 /* Theme.swift */,
 				EB896B3784B36AEF875BB81C /* UninstallView.swift */,
 			);
 			path = View;
@@ -301,6 +304,7 @@
 				ABB844CFA71DA286E6198BF2 /* SafetyController.swift in Sources */,
 				97433759C25EA852940B3133 /* SettingsView.swift in Sources */,
 				D455E75FE1409E6AB1A61E12 /* SidebarView.swift in Sources */,
+				A1F5C0DE00000000000000A2 /* Theme.swift in Sources */,
 				B10B12EF48384CF315BCF0FD /* SudoHelper.swift in Sources */,
 				AA88888888888888AAAAAAAA /* UninstallModel.swift in Sources */,
 				9965125018C98EE33BC95D6E /* UninstallView.swift in Sources */,

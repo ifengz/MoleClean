@@ -19,14 +19,14 @@ struct SidebarView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.bar)
+        .background(MoleTheme.parchment)
     }
 
     private var brandHeader: some View {
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: "leaf.circle.fill")
                 .font(.system(size: 24))
-                .foregroundStyle(MoleTheme.pine)
+                .foregroundStyle(MoleTheme.primary)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Mole UI")
@@ -46,7 +46,7 @@ struct SidebarView: View {
             Text(title.uppercased())
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .tracking(0.8)
-                .foregroundStyle(MoleTheme.pine)
+                .foregroundStyle(MoleTheme.primary)
                 .padding(.horizontal, 4)
 
             VStack(spacing: 4) {
@@ -66,7 +66,7 @@ struct SidebarView: View {
             HStack(spacing: 10) {
                 Image(systemName: item.icon)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : MoleTheme.pine)
+                    .foregroundStyle(isSelected ? Color.white : MoleTheme.primary)
                     .frame(width: 24, height: 24)
 
                 Text(item.rawValue)
@@ -78,22 +78,12 @@ struct SidebarView: View {
             .padding(.horizontal, 10)
             .frame(height: 34)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        isSelected
-                            ? AnyShapeStyle(
-                                LinearGradient(
-                                    colors: [MoleTheme.pine, MoleTheme.moss],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            : AnyShapeStyle(.thinMaterial)
-                    )
+                RoundedRectangle(cornerRadius: MoleTheme.radiusSm, style: .continuous)
+                    .fill(isSelected ? MoleTheme.primary : Color.clear)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isSelected ? Color.white.opacity(0.20) : MoleTheme.line, lineWidth: 1)
+                RoundedRectangle(cornerRadius: MoleTheme.radiusSm, style: .continuous)
+                    .stroke(isSelected ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1)
             )
             .contentShape(Rectangle())
         }

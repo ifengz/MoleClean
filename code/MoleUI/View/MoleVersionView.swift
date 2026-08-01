@@ -3,7 +3,6 @@ import SwiftUI
 /// Mole UI version information display
 struct MoleVersionView: View {
     @Environment(VersionModel.self) var versionChecker
-    @Environment(\.colorScheme) private var colorScheme
     let bundledCLIVersion: String?
 
     var body: some View {
@@ -36,13 +35,13 @@ struct MoleVersionView: View {
                     title: "Mole UI",
                     value: versionChecker.currentVersion ?? "Unknown",
                     systemImage: "app.badge.fill",
-                    tint: .green
+                    tint: MoleTheme.primary
                 )
                 versionChip(
                     title: "Bundled CLI",
                     value: bundledCLIVersion ?? "Unknown",
                     systemImage: "terminal.fill",
-                    tint: .blue
+                    tint: MoleTheme.primaryDark
                 )
             }
 
@@ -92,10 +91,10 @@ struct MoleVersionView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(MoleTheme.parchment, in: RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.06), lineWidth: 1)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
+                .stroke(MoleTheme.line, lineWidth: 1)
         )
         .task {
             await versionChecker.loadCurrentVersion()
@@ -119,12 +118,12 @@ struct MoleVersionView: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(colorScheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.025))
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
+                .fill(tint.opacity(0.06))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(tint.opacity(colorScheme == .dark ? 0.22 : 0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
+                .stroke(tint.opacity(0.14), lineWidth: 1)
         )
     }
 }

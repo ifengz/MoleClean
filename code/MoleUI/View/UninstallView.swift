@@ -75,7 +75,7 @@ struct UninstallView: View {
                             title: "Scanned",
                             value: relativeTime(from: lastScan),
                             systemImage: "clock.badge.checkmark",
-                            tint: MoleTheme.sky
+                            tint: MoleTheme.primary
                         )
                     }
 

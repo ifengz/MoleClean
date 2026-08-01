@@ -128,7 +128,7 @@ struct InstallerView: View {
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(MoleTheme.sky.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(MoleTheme.primaryLight, in: RoundedRectangle(cornerRadius: MoleTheme.radiusSm, style: .continuous))
 
                 Text(MetricsFormatter.humanBytes(file.sizeBytes))
                     .font(.system(.caption, design: .monospaced))

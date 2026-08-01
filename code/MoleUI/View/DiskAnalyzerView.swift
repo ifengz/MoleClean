@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 
 struct DiskAnalyzerView: View {
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(DiskModel.self) var scanner
     @State private var hasInitialScan = false
     @AppStorage("showHiddenFiles") private var showHiddenFiles = false
@@ -33,7 +32,7 @@ struct DiskAnalyzerView: View {
                         title: "Current Path",
                         value: scanner.currentPath.lastPathComponent,
                         systemImage: "folder.fill",
-                        tint: MoleTheme.sky
+                        tint: MoleTheme.primary
                     )
                     MoleMetricBadge(
                         title: "Visible Size",
@@ -48,12 +47,11 @@ struct DiskAnalyzerView: View {
                 breadcrumbBar
                 contentArea
             }
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .background(MoleTheme.parchment, in: RoundedRectangle(cornerRadius: MoleTheme.radiusLg, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                RoundedRectangle(cornerRadius: MoleTheme.radiusLg, style: .continuous)
                     .stroke(MoleTheme.line, lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(0.05), radius: 18, y: 8)
         }
         .padding(16)
         .onAppear {
@@ -72,8 +70,8 @@ struct DiskAnalyzerView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 14, weight: .semibold))
                     .frame(width: 28, height: 28)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .background(MoleTheme.primaryLight)
+                    .clipShape(RoundedRectangle(cornerRadius: MoleTheme.radiusSm))
             }
             .disabled(scanner.pathStack.isEmpty)
             .buttonStyle(.borderless)
@@ -84,8 +82,8 @@ struct DiskAnalyzerView: View {
                 Image(systemName: "house.fill")
                     .font(.system(size: 12))
                     .frame(width: 28, height: 28)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .background(MoleTheme.primaryLight)
+                    .clipShape(RoundedRectangle(cornerRadius: MoleTheme.radiusSm))
             }
             .buttonStyle(.borderless)
 
@@ -105,8 +103,8 @@ struct DiskAnalyzerView: View {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 12))
                     .frame(width: 28, height: 28)
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .background(MoleTheme.primaryLight)
+                    .clipShape(RoundedRectangle(cornerRadius: MoleTheme.radiusSm))
             }
             .buttonStyle(.borderless)
             .disabled(scanner.isScanning)
@@ -117,7 +115,12 @@ struct DiskAnalyzerView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.thinMaterial)
+        .background(MoleTheme.sand)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(MoleTheme.line)
+                .frame(height: 1)
+        }
     }
 
     private var breadcrumbPath: some View {
@@ -304,11 +307,10 @@ struct DiskAnalyzerView: View {
             }
             .padding(.horizontal, 14)
             .frame(height: 44)
-            .background(.thinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(MoleTheme.parchment, in: RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(barColor.opacity(colorScheme == .dark ? 0.18 : 0.12), lineWidth: 1)
+                RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
+                    .stroke(barColor.opacity(0.12), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)

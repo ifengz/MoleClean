@@ -141,7 +141,6 @@ enum FullDiskAccessHelper {
 }
 
 struct SettingsView: View {
-    @Environment(\.colorScheme) private var colorScheme
     @State private var fullDiskAccessStatus = FullDiskAccessHelper.status()
 
     var body: some View {
@@ -177,7 +176,7 @@ struct SettingsView: View {
                     Text("GitHub")
                     Spacer()
                     Link("github.com/imnotnoahhh/MoleUI", destination: URL(string: "https://github.com/imnotnoahhh/MoleUI")!)
-                        .foregroundStyle(MoleTheme.sky)
+                        .foregroundStyle(MoleTheme.primary)
                         .font(.system(.caption, design: .monospaced))
                 }
             }
@@ -246,24 +245,15 @@ struct SettingsView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             MoleSectionHeader(title: title, subtitle: nil, symbol: symbol)
-
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(colorScheme == .dark ? Color(red: 0.13, green: 0.14, blue: 0.16) : Color.white.opacity(0.92))
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(colorScheme == .dark ? Color.white.opacity(0.02) : Color.white.opacity(0.28))
-            }
-        }
+        .background(MoleTheme.parchment, in: RoundedRectangle(cornerRadius: MoleTheme.radiusLg, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusLg, style: .continuous)
                 .stroke(MoleTheme.line, lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.20 : 0.05), radius: 16, y: 8)
     }
 
     private func settingsValueRow(_ label: String, _ value: String) -> some View {
@@ -294,17 +284,10 @@ struct SettingsView: View {
             }
         }
         .padding(12)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(colorScheme == .dark ? Color.white.opacity(0.04) : Color.black.opacity(0.02))
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(tint.opacity(colorScheme == .dark ? 0.12 : 0.08))
-            }
-        )
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(tint.opacity(colorScheme == .dark ? 0.22 : 0.14), lineWidth: 1)
+            RoundedRectangle(cornerRadius: MoleTheme.radiusMd, style: .continuous)
+                .stroke(tint.opacity(0.14), lineWidth: 1)
         )
     }
 
