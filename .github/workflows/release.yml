@@ -46,7 +46,7 @@ jobs:
 
       - name: Archive app
         run: |
-          xcodebuild -scheme "$SCHEME" \
+          xcodebuild -project code/MoleUI.xcodeproj -scheme "$SCHEME" \
             -configuration Release \
             -archivePath $RUNNER_TEMP/MoleUI.xcarchive \
             CODE_SIGNING_ALLOWED=NO \
@@ -67,7 +67,7 @@ jobs:
           mkdir -p "$MOLE_DIR"
 
           # Copy from project Resources
-          cp -R Resources/mole/* "$MOLE_DIR/"
+          cp -R code/Resources/mole/* "$MOLE_DIR/"
 
           echo "Mole CLI bundled into app"
           ls -la "$MOLE_DIR/"
@@ -83,7 +83,7 @@ jobs:
             if [ -f "$bin" ] && file "$bin" | grep -q "Mach-O"; then
               echo "Signing nested binary: $bin"
               codesign --force --timestamp --options runtime \
-                --entitlements MoleUI/BundledBinaries.entitlements \
+                --entitlements code/MoleUI/BundledBinaries.entitlements \
                 --sign "$SIGN_ID" "$bin"
             fi
           done
@@ -96,7 +96,7 @@ jobs:
 
           # 3. Sign the main app bundle last
           codesign --force --timestamp --options runtime \
-            --entitlements MoleUI/MoleUI.entitlements \
+            --entitlements code/MoleUI/MoleUI.entitlements \
             --sign "$SIGN_ID" "$APP"
 
           # 4. Verify with Apple's recommended flags

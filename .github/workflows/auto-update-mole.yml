@@ -62,18 +62,18 @@ jobs:
           curl -fsSL "https://github.com/tw93/Mole/archive/refs/tags/${TAG}.tar.gz" -o /tmp/mole-source.tar.gz
           mkdir -p /tmp/mole-source
           tar -xzf /tmp/mole-source.tar.gz -C /tmp/mole-source --strip-components=1
-          rm -rf Resources/mole
-          cp -R /tmp/mole-source Resources/mole
+          rm -rf code/Resources/mole
+          cp -R /tmp/mole-source code/Resources/mole
 
       - name: Setup Go
         if: steps.check_update.outputs.update_needed == 'true'
         uses: actions/setup-go@v5
         with:
-          go-version-file: Resources/mole/go.mod
+          go-version-file: code/Resources/mole/go.mod
 
       - name: Build Go binaries
         if: steps.check_update.outputs.update_needed == 'true'
-        working-directory: Resources/mole
+        working-directory: code/Resources/mole
         run: |
           make release-amd64
           make release-arm64
@@ -90,31 +90,31 @@ jobs:
           SMOKE_HOME="/tmp/mole-smoke-home"
 
           for f in \
-            Resources/mole/mole \
-            Resources/mole/bin/status-go \
-            Resources/mole/bin/analyze-go \
-            Resources/mole/bin/clean.sh \
-            Resources/mole/bin/optimize.sh \
-            Resources/mole/bin/purge.sh \
-            Resources/mole/bin/installer.sh \
-            Resources/mole/bin/uninstall.sh \
-            Resources/mole/lib/check/health_json.sh; do
+            code/Resources/mole/mole \
+            code/Resources/mole/bin/status-go \
+            code/Resources/mole/bin/analyze-go \
+            code/Resources/mole/bin/clean.sh \
+            code/Resources/mole/bin/optimize.sh \
+            code/Resources/mole/bin/purge.sh \
+            code/Resources/mole/bin/installer.sh \
+            code/Resources/mole/bin/uninstall.sh \
+            code/Resources/mole/lib/check/health_json.sh; do
             if [ ! -f "$f" ]; then
               ERRORS="$ERRORS\n- Missing file: $f"
             fi
           done
 
           for d in \
-            Resources/mole/lib/core \
-            Resources/mole/lib/clean \
-            Resources/mole/lib/optimize \
-            Resources/mole/lib/uninstall; do
+            code/Resources/mole/lib/core \
+            code/Resources/mole/lib/clean \
+            code/Resources/mole/lib/optimize \
+            code/Resources/mole/lib/uninstall; do
             if [ ! -d "$d" ]; then
               ERRORS="$ERRORS\n- Missing directory: $d"
             fi
           done
 
-          for bin in Resources/mole/bin/status-go Resources/mole/bin/analyze-go; do
+          for bin in code/Resources/mole/bin/status-go code/Resources/mole/bin/analyze-go; do
             if [ ! -x "$bin" ]; then
               ERRORS="$ERRORS\n- Binary not executable: $bin"
             fi
@@ -124,24 +124,24 @@ jobs:
           done
 
           for script in \
-            Resources/mole/bin/clean.sh \
-            Resources/mole/bin/optimize.sh \
-            Resources/mole/bin/purge.sh \
-            Resources/mole/bin/installer.sh \
-            Resources/mole/bin/uninstall.sh; do
+            code/Resources/mole/bin/clean.sh \
+            code/Resources/mole/bin/optimize.sh \
+            code/Resources/mole/bin/purge.sh \
+            code/Resources/mole/bin/installer.sh \
+            code/Resources/mole/bin/uninstall.sh; do
             if [ -f "$script" ] && [ ! -x "$script" ]; then
               ERRORS="$ERRORS\n- Script not executable: $script"
             fi
           done
 
           if [ -z "$ERRORS" ]; then
-            if ! bash Resources/mole/mole version > /tmp/mole-version.txt 2>/tmp/mole-version.err; then
+            if ! bash code/Resources/mole/mole version > /tmp/mole-version.txt 2>/tmp/mole-version.err; then
               ERRORS="$ERRORS\n- 'mole version' failed"
             fi
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! bash Resources/mole/mole status --json > /tmp/mole-status.json 2>/tmp/mole-status.err; then
+            if ! bash code/Resources/mole/mole status --json > /tmp/mole-status.json 2>/tmp/mole-status.err; then
               ERRORS="$ERRORS\n- 'mole status --json' failed"
             elif ! python3 -c 'import json; json.load(open("/tmp/mole-status.json"))' 2>/tmp/mole-status-parse.err; then
               ERRORS="$ERRORS\n- 'mole status --json' returned invalid JSON"
@@ -162,7 +162,7 @@ jobs:
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! bash Resources/mole/mole analyze --json "$SMOKE_HOME" > /tmp/mole-analyze.json 2>/tmp/mole-analyze.err; then
+            if ! bash code/Resources/mole/mole analyze --json "$SMOKE_HOME" > /tmp/mole-analyze.json 2>/tmp/mole-analyze.err; then
               ERRORS="$ERRORS\n- 'mole analyze --json \$SMOKE_HOME' failed"
             elif ! python3 -c 'import json; json.load(open("/tmp/mole-analyze.json"))' 2>/tmp/mole-analyze-parse.err; then
               ERRORS="$ERRORS\n- 'mole analyze --json \$SMOKE_HOME' returned invalid JSON"
@@ -170,7 +170,7 @@ jobs:
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash Resources/mole/lib/check/health_json.sh > /tmp/mole-health.json 2>/tmp/mole-health.err; then
+            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash code/Resources/mole/lib/check/health_json.sh > /tmp/mole-health.json 2>/tmp/mole-health.err; then
               ERRORS="$ERRORS\n- 'lib/check/health_json.sh' failed"
             elif ! python3 -c 'import json; json.load(open("/tmp/mole-health.json"))' 2>/tmp/mole-health-parse.err; then
               ERRORS="$ERRORS\n- 'lib/check/health_json.sh' returned invalid JSON"
@@ -178,31 +178,31 @@ jobs:
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 MOLE_DRY_RUN=1 DRY_RUN=true bash Resources/mole/mole clean --dry-run > /tmp/mole-clean-dry-run.txt 2>/tmp/mole-clean-dry-run.err; then
+            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 MOLE_DRY_RUN=1 DRY_RUN=true bash code/Resources/mole/mole clean --dry-run > /tmp/mole-clean-dry-run.txt 2>/tmp/mole-clean-dry-run.err; then
               ERRORS="$ERRORS\n- 'mole clean --dry-run' failed"
             fi
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash Resources/mole/mole optimize --dry-run > /tmp/mole-optimize-dry-run.txt 2>/tmp/mole-optimize-dry-run.err; then
+            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash code/Resources/mole/mole optimize --dry-run > /tmp/mole-optimize-dry-run.txt 2>/tmp/mole-optimize-dry-run.err; then
               ERRORS="$ERRORS\n- 'mole optimize --dry-run' failed"
             fi
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash Resources/mole/mole purge --dry-run > /tmp/mole-purge-dry-run.txt 2>/tmp/mole-purge-dry-run.err; then
+            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash code/Resources/mole/mole purge --dry-run > /tmp/mole-purge-dry-run.txt 2>/tmp/mole-purge-dry-run.err; then
               ERRORS="$ERRORS\n- 'mole purge --dry-run' failed"
             fi
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash Resources/mole/mole installer --dry-run > /tmp/mole-installer-dry-run.txt 2>/tmp/mole-installer-dry-run.err; then
+            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash code/Resources/mole/mole installer --dry-run > /tmp/mole-installer-dry-run.txt 2>/tmp/mole-installer-dry-run.err; then
               ERRORS="$ERRORS\n- 'mole installer --dry-run' failed"
             fi
           fi
 
           if [ -z "$ERRORS" ]; then
-            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash Resources/mole/mole uninstall --dry-run > /tmp/mole-uninstall-dry-run.txt 2>/tmp/mole-uninstall-dry-run.err; then
+            if ! env HOME="$SMOKE_HOME" TERM=dumb MOLE_TEST_MODE=1 bash code/Resources/mole/mole uninstall --dry-run > /tmp/mole-uninstall-dry-run.txt 2>/tmp/mole-uninstall-dry-run.err; then
               ERRORS="$ERRORS\n- 'mole uninstall --dry-run' failed"
             fi
           fi
@@ -222,12 +222,12 @@ jobs:
         run: |
           VERSION="${{ steps.latest_release.outputs.version }}"
           echo "$VERSION" > .mole-cli-version
-          echo "$VERSION" > MoleUI/.mole-cli-version
+          echo "$VERSION" > code/MoleUI/.mole-cli-version
 
-          CURRENT_VERSION=$(grep "MARKETING_VERSION = " MoleUI.xcodeproj/project.pbxproj | head -1 | sed 's/.*MARKETING_VERSION = \(.*\);/\1/')
+          CURRENT_VERSION=$(grep "MARKETING_VERSION = " code/MoleUI.xcodeproj/project.pbxproj | head -1 | sed 's/.*MARKETING_VERSION = \(.*\);/\1/')
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
           NEW_MOLEUI_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
-          sed -i '' "s/MARKETING_VERSION = [^;]*/MARKETING_VERSION = $NEW_MOLEUI_VERSION/" MoleUI.xcodeproj/project.pbxproj
+          sed -i '' "s/MARKETING_VERSION = [^;]*/MARKETING_VERSION = $NEW_MOLEUI_VERSION/" code/MoleUI.xcodeproj/project.pbxproj
           echo "Updated MoleUI version: $CURRENT_VERSION → $NEW_MOLEUI_VERSION"
           echo "moleui_version=$NEW_MOLEUI_VERSION" >> $GITHUB_OUTPUT
 

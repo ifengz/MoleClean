@@ -33,3 +33,8 @@ Resources/mole.backup/
 TestResults.xcresult
 test-results.json
 .claude/settings.local.json
+
+# Local task records
+doc/task_plan.md
+doc/progress.md
+doc/findings.md

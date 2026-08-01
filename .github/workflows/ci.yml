@@ -24,7 +24,7 @@ jobs:
 
       - name: Check code formatting
         run: |
-          swiftformat --lint MoleUI/
+          swiftformat --lint code/MoleUI/
           if [ $? -ne 0 ]; then
             echo "❌ Code formatting issues found. Run 'just fmt' to fix."
             exit 1
@@ -32,7 +32,7 @@ jobs:
 
       - name: Run SwiftLint
         run: |
-          swiftlint lint --strict
+          swiftlint lint --strict code
           if [ $? -ne 0 ]; then
             echo "❌ SwiftLint violations found. Run 'just lint' and fix issues."
             exit 1
@@ -54,7 +54,7 @@ jobs:
 
       - name: Build
         run: |
-          xcodebuild -scheme MoleUI \
+          xcodebuild -project code/MoleUI.xcodeproj -scheme MoleUI \
             -configuration Debug \
             -destination 'platform=macOS' \
             CODE_SIGN_IDENTITY="-" \
@@ -64,7 +64,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          xcodebuild test -scheme MoleUI \
+          xcodebuild test -project code/MoleUI.xcodeproj -scheme MoleUI \
             -configuration Debug \
             -destination 'platform=macOS' \
             -only-testing:MoleUITests \
@@ -76,7 +76,7 @@ jobs:
       - name: Run UI tests (allow failure)
         continue-on-error: true
         run: |
-          xcodebuild test -scheme MoleUI \
+          xcodebuild test -project code/MoleUI.xcodeproj -scheme MoleUI \
             -configuration Debug \
             -destination 'platform=macOS' \
             -only-testing:MoleUITests/UIFlowTests \
@@ -148,7 +148,7 @@ jobs:
       - name: Generate coverage
         continue-on-error: true
         run: |
-          xcodebuild test -scheme MoleUI \
+          xcodebuild test -project code/MoleUI.xcodeproj -scheme MoleUI \
             -configuration Debug \
             -destination 'platform=macOS' \
             -enableCodeCoverage YES \
