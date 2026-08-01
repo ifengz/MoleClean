@@ -697,4 +697,3 @@ struct EdgeCasesTests {
         #expect(target.isRecent == true)
     }
 }
-

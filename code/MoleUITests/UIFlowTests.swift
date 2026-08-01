@@ -102,7 +102,7 @@ final class UIFlowTests: XCTestCase {
         purgeButton.click()
 
         let scanButton = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Scan'")).firstMatch
-        XCTAssertTrue(scanButton.waitForExistence(timeout: 3) || app.staticTexts.count > 0,
+        XCTAssertTrue(scanButton.waitForExistence(timeout: 3) || !app.staticTexts.isEmpty,
                       "Purge view should show scan controls or content")
     }
 
@@ -254,4 +254,3 @@ final class UIFlowTests: XCTestCase {
         XCTAssertTrue(app.windows.firstMatch.exists, "App should not crash during rapid navigation")
     }
 }
-
