@@ -51,7 +51,7 @@
 		568727435DA94E75A6EF82BD /* .mole-cli-version */ = {isa = PBXFileReference; lastKnownFileType = text; path = ".mole-cli-version"; sourceTree = "<group>"; };
 		1BE3A3CCA1B2FB0C00DAD376 /* ErrorTranslator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorTranslator.swift; sourceTree = "<group>"; };
 		24C213975ADB4EC643F4BF9D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		2697DDE62676C0815E26BBDB /* Mole UI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mole UI.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		2697DDE62676C0815E26BBDB /* Mole Clean.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mole Clean.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		3D4A2DA29A1920FEC3EECABD /* MoleUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MoleUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		43C1897658A5457CF58EF7BD /* InstallerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallerView.swift; sourceTree = "<group>"; };
 		54D166A995F696C7B00CD5E3 /* MoleVersionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoleVersionView.swift; sourceTree = "<group>"; };
@@ -134,7 +134,7 @@
 		9646630512C737DF4EC1CC93 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				2697DDE62676C0815E26BBDB /* Mole UI.app */,
+				2697DDE62676C0815E26BBDB /* Mole Clean.app */,
 				3D4A2DA29A1920FEC3EECABD /* MoleUITests.xctest */,
 			);
 			name = Products;
@@ -182,7 +182,7 @@
 			packageProductDependencies = (
 			);
 			productName = MoleUI;
-			productReference = 2697DDE62676C0815E26BBDB /* Mole UI.app */;
+			productReference = 2697DDE62676C0815E26BBDB /* Mole Clean.app */;
 			productType = "com.apple.product-type.application";
 		};
 		D48E894ECAC1CFA1D2DA4B23 /* MoleUITests */ = {
@@ -341,7 +341,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.qinfuyao.MoleUITests;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mole UI.app/Contents/MacOS/Mole UI";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mole Clean.app/Contents/MacOS/Mole Clean";
 			};
 			name = Release;
 		};
@@ -363,7 +363,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.qinfuyao.MoleUITests;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mole UI.app/Contents/MacOS/Mole UI";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Mole Clean.app/Contents/MacOS/Mole Clean";
 			};
 			name = Debug;
 		};
@@ -389,7 +389,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.qinfuyao.MoleUI;
-				PRODUCT_NAME = "Mole UI";
+				PRODUCT_NAME = "Mole Clean";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
 			};
@@ -476,7 +476,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.qinfuyao.MoleUI;
-				PRODUCT_NAME = "Mole UI";
+				PRODUCT_NAME = "Mole Clean";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
 			};

@@ -11,7 +11,7 @@ permissions:
 
 env:
   SCHEME: MoleUI
-  PRODUCT_NAME: "Mole UI"
+  PRODUCT_NAME: "Mole Clean"
   APP_BUNDLE_ID: com.qinfuyao.MoleUI
 
 jobs:

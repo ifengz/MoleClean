@@ -1,4 +1,4 @@
-# Mole UI
+# Mole Clean
 
 > **⚠️ Early Development** — This project is in active development and has not been extensively tested. Use Dry Run mode for cleanup operations and please [report any issues](https://github.com/imnotnoahhh/MoleUI/issues).
 
@@ -39,7 +39,7 @@ Native macOS GUI for [Mole](https://github.com/tw93/Mole). Built with SwiftUI, w
 
 ## Installation
 
-Download the latest DMG from [GitHub Releases](https://github.com/imnotnoahhh/MoleUI/releases), open it, and drag Mole UI into Applications.
+Download the latest DMG from [GitHub Releases](https://github.com/imnotnoahhh/MoleUI/releases), open it, and drag Mole Clean into Applications.
 
 Mole CLI is bundled inside the app, no additional installation required.
 
@@ -162,18 +162,18 @@ MoleUI/
 
 ## Credits
 
-- [tw93/Mole](https://github.com/tw93/Mole) — Original CLI tool, Mole UI is based on this project
+- [tw93/Mole](https://github.com/tw93/Mole) — Original CLI tool, Mole Clean is based on this project
 - Built with SwiftUI + NavigationSplitView for native macOS experience
 
 ## Troubleshooting
 
-**App won't open:** Right-click → Open, or run `xattr -cr "/Applications/Mole UI.app"`
+**App won't open:** Right-click → Open, or run `xattr -cr "/Applications/Mole Clean.app"`
 
 **Dashboard not loading:** Restart the app. If issue persists, check Console.app for errors.
 
 **Slow disk scanning:** Large directories take time. Scan smaller folders first.
 
-**Full Disk Access needed:** For comprehensive disk analysis without repeated permission prompts, enable Full Disk Access in System Settings → Privacy & Security → Full Disk Access. Mole UI can guide you there from the Settings tab.
+**Full Disk Access needed:** For comprehensive disk analysis without repeated permission prompts, enable Full Disk Access in System Settings → Privacy & Security → Full Disk Access. Mole Clean can guide you there from the Settings tab.
 
 For more issues, check [GitHub Issues](https://github.com/imnotnoahhh/MoleUI/issues).
 

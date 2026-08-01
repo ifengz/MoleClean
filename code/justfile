@@ -4,7 +4,7 @@ default:
     @just --list
 
 scheme := "MoleUI"
-app_name := "Mole UI"
+app_name := "Mole Clean"
 
 # ============================================
 # Development

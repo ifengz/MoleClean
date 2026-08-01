@@ -202,7 +202,7 @@ final class VersionModel {
 
 ### 5.2 UI Display
 
-Settings → About → Mole UI version card:
+Settings → About → Mole Clean version card:
 - Display current version (from Info.plist)
 - Display latest version (from GitHub API)
 - If update available, show "Update available" and "View Release" button

@@ -1,12 +1,12 @@
-# Contributing to Mole UI
+# Contributing to Mole Clean
 
-Thank you for your interest in improving Mole UI! This guide focuses on the most valuable contributions: **UI/UX improvements**, **Mole CLI compatibility testing**, **stability**, and **performance**.
+Thank you for your interest in improving Mole Clean! This guide focuses on the most valuable contributions: **UI/UX improvements**, **Mole CLI compatibility testing**, **stability**, and **performance**.
 
 ---
 
 ## 🎨 UI/UX Improvements
 
-We welcome design improvements to make Mole UI more intuitive and visually appealing.
+We welcome design improvements to make Mole Clean more intuitive and visually appealing.
 
 ### Current UI Stack
 - **SwiftUI** with `NavigationSplitView` layout
@@ -52,7 +52,7 @@ We welcome design improvements to make Mole UI more intuitive and visually appea
 
 ## 🧪 Mole CLI Compatibility Testing
 
-Mole UI wraps the [Mole CLI tool](https://github.com/tw93/Mole). When Mole CLI updates, we need to verify compatibility.
+Mole Clean wraps the [Mole CLI tool](https://github.com/tw93/Mole). When Mole CLI updates, we need to verify compatibility.
 
 ### What to Test
 
@@ -97,7 +97,7 @@ The `.github/workflows/auto-update-mole.yml` workflow automatically:
 
 ## 🛡️ Stability Improvements
 
-Help make Mole UI more robust and reliable.
+Help make Mole Clean more robust and reliable.
 
 ### Common Stability Issues
 
@@ -128,7 +128,7 @@ Help make Mole UI more robust and reliable.
 2. **Collect logs**: Check Console.app for crash reports
 3. **Create issue** with:
    - macOS version
-   - Mole UI version
+   - Mole Clean version
    - Mole CLI version (`.mole-cli-version`)
    - Steps to reproduce
    - Expected vs. actual behavior
@@ -138,7 +138,7 @@ Help make Mole UI more robust and reliable.
 
 ## ⚡ Performance Optimization
 
-Help make Mole UI faster and more responsive.
+Help make Mole Clean faster and more responsive.
 
 ### Performance Bottlenecks
 
@@ -473,7 +473,7 @@ Closes #123
 
 ## 🐛 Reporting Issues
 
-**For bugs**: Include macOS version, Mole UI version, steps to reproduce, expected vs. actual behavior
+**For bugs**: Include macOS version, Mole Clean version, steps to reproduce, expected vs. actual behavior
 
 **For feature requests**: Describe the use case, why it's valuable, and any UI mockups
 

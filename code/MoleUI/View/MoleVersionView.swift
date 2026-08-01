@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Mole UI version information display
+/// Mole Clean version information display
 struct MoleVersionView: View {
     @Environment(VersionModel.self) var versionChecker
     let bundledCLIVersion: String?
