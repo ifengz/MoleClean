@@ -1,6 +1,6 @@
 # Mole Clean
 
-> **⚠️ Early Development** — This project is in active development and has not been extensively tested. Use Dry Run mode for cleanup operations and please [report any issues](https://github.com/imnotnoahhh/MoleUI/issues).
+> **⚠️ Early Development** — This project is in active development and has not been extensively tested. Use Dry Run mode for cleanup operations and please [report any issues](https://github.com/imnotnoahhh/MoleClean/issues).
 
 Native macOS GUI for [Mole](https://github.com/tw93/Mole). Built with SwiftUI, with the upstream Mole CLI as the core kernel.
 
@@ -8,11 +8,13 @@ Native macOS GUI for [Mole](https://github.com/tw93/Mole). Built with SwiftUI, w
 
 ![Mole Clean status](./Resources/screenshots/mole-clean-status.png)
 
-![Mole Clean settings](./Resources/screenshots/mole-clean-settings.png)
-
 ![Mole Clean clean](./Resources/screenshots/mole-clean-clean.png)
 
 ![Mole Clean optimize](./Resources/screenshots/mole-clean-optimize.png)
+
+![Mole Clean settings](./Resources/screenshots/mole-clean-settings.png)
+
+The screenshots above are the tracked product UI assets used for the current README. The settings page includes version, privacy, and upstream CLI information; language selection is available in the current app build.
 
 ## 📚 Documentation
 
@@ -20,6 +22,7 @@ Native macOS GUI for [Mole](https://github.com/tw93/Mole). Built with SwiftUI, w
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history
 - **[SECURITY.md](SECURITY.md)** - Security policy
 - **[AUTO_UPDATE.md](AUTO_UPDATE.md)** - Auto-update system details
+- **[GitHub Actions build guide](../docs/build.md)** - CI, DMG, and Mole CLI workflows
 
 ## Branch Strategy
 
@@ -41,6 +44,7 @@ New feature and upstream-update PRs must target `main/blue-theme`. Do not merge 
 | Installer Management | `mo installer` | ✅ |
 | App Uninstaller | `mo uninstall` | ✅ |
 | Full Disk Access Detection | - | ✅ GUI only |
+| English / Simplified Chinese UI | - | ✅ Persisted setting |
 | Touch ID sudo | `mo touchid` | CLI only |
 | Shell Completion | `mo completion` | CLI only |
 | Self Update | `mo update` | CLI only |
@@ -55,7 +59,7 @@ New feature and upstream-update PRs must target `main/blue-theme`. Do not merge 
 
 ## Installation
 
-Download the latest DMG from [GitHub Releases](https://github.com/imnotnoahhh/MoleUI/releases), open it, and drag Mole Clean into Applications.
+Download the latest DMG from [GitHub Releases](https://github.com/imnotnoahhh/MoleClean/releases), open it, and drag Mole Clean into Applications.
 
 Mole CLI is bundled inside the app, no additional installation required.
 
@@ -65,13 +69,15 @@ Mole CLI is bundled inside the app, no additional installation required.
 
 ## Build from Source
 
+For the supported GitHub Actions workflow, branch selection, DMG artifact download, signing secrets, and macOS quarantine guidance, see the [GitHub Actions build guide](../docs/build.md).
+
 ```bash
 # Install just (build runner)
 brew install just
 
 # Clone repository
-git clone https://github.com/imnotnoahhh/MoleUI.git
-cd MoleUI
+git clone https://github.com/imnotnoahhh/MoleClean.git
+cd MoleClean/code
 
 # Build
 just build
@@ -200,7 +206,7 @@ Only run this command for an app downloaded from a trusted source or built by th
 
 **Full Disk Access needed:** For comprehensive disk analysis without repeated permission prompts, enable Full Disk Access in System Settings → Privacy & Security → Full Disk Access. Mole Clean can guide you there from the Settings tab.
 
-For more issues, check [GitHub Issues](https://github.com/imnotnoahhh/MoleUI/issues).
+For more issues, check [GitHub Issues](https://github.com/imnotnoahhh/MoleClean/issues).
 
 ## License
 
