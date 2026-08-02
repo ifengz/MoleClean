@@ -44,6 +44,7 @@ MoleCleaner 是一个尚未开始实现的 macOS 清理工具方案：以
 4. [许可证与商标](04-license-trademark.md)
 5. [实施计划](05-implementation-plan.md)
 6. [UI 开工顺序](06-ui-start.md)
+7. [GitHub Actions 构建指南](build.md)
 
 ## 硬约束
 
