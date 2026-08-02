@@ -450,7 +450,7 @@ Closes #123
    - **Security Scan**: Hardcoded secrets detection, unsafe pattern checks
 2. **Maintainer review** — usually within 2-3 days
 3. **Address feedback** — make requested changes
-4. **Approval and merge** — squash merge to main
+4. **Approval and merge** — squash merge to `main/blue-theme`
 
 ### Common Rejection Reasons
 

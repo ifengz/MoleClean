@@ -21,6 +21,14 @@ Native macOS GUI for [Mole](https://github.com/tw93/Mole). Built with SwiftUI, w
 - **[SECURITY.md](SECURITY.md)** - Security policy
 - **[AUTO_UPDATE.md](AUTO_UPDATE.md)** - Auto-update system details
 
+## Branch Strategy
+
+- `main-moleui` is the untouched MoleUI baseline imported from the original repository, fixed at commit `697a564` before this fork's changes.
+- `main/blue-theme` is the repository's default and stable development branch. UI work, upstream Mole CLI updates, and release fixes all land here.
+- `auto-update-mole-*` branches are temporary upstream-update branches. After their PR is merged into `main/blue-theme`, delete them.
+
+New feature and upstream-update PRs must target `main/blue-theme`. Do not merge routine work back into `main-moleui`.
+
 ## Features
 
 | Feature | CLI Command | GUI Support |
@@ -118,7 +126,7 @@ Quick start:
 1. Fork the repo and create a feature branch
 2. Follow the existing MV architecture — logic in `Model/`, UI in `View/`
 3. Run `just fmt && just lint` before committing
-4. Open a PR against `main`
+4. Open a PR against `main/blue-theme`
 
 ## Auto-Update System
 

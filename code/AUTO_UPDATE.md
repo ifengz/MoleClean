@@ -240,7 +240,7 @@ private func compareVersions(_ v1: String, _ v2: String) -> ComparisonResult {
 1. Visit GitHub Actions
 2. Select "Auto Update Mole CLI" workflow
 3. Click "Run workflow"
-4. Select branch (usually `main`)
+4. Select branch `main/blue-theme`
 5. Click "Run workflow" to confirm
 
 ### 6.2 Manual Mole CLI Update
@@ -375,7 +375,7 @@ If auto-update introduces issues:
 1. **Immediate Rollback**
    ```bash
    git revert {commit-hash}
-   git push origin main
+   git push origin main/blue-theme
    ```
 
 2. **Delete Incorrect Release**

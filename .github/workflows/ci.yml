@@ -2,10 +2,10 @@ name: CI
 
 on:
   pull_request:
-    branches: [dev, main]
+    branches: [main/blue-theme]
     types: [opened, synchronize, reopened]
   push:
-    branches: [dev, main]
+    branches: [main/blue-theme]
   workflow_dispatch:
 
 jobs:
@@ -184,4 +184,3 @@ jobs:
                 body: body
               });
             }
-

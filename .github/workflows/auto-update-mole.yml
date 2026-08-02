@@ -236,6 +236,7 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          base: main/blue-theme
           commit-message: "chore: update Mole CLI to ${{ steps.latest_release.outputs.version }}"
           branch: auto-update-mole-${{ steps.latest_release.outputs.version }}
           delete-branch: true
