@@ -160,7 +160,7 @@ struct CleanView: View {
         }
     }
 
-    private func cleanItemRow(icon: String, text: String) -> some View {
+    private func cleanItemRow(icon: String, text: LocalizedStringKey) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
                 .frame(width: 20)

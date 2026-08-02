@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct MoleApp: App {
+    @AppStorage("appLanguage") private var appLanguageRaw = AppLanguage.english.rawValue
     @State private var metricsModel = MetricsModel()
     @State private var cleanModel = CleanModel()
     @State private var optimizeModel = OptimizeModel()
@@ -16,6 +17,7 @@ struct MoleApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(\.locale, selectedLanguage.locale)
                 .environment(metricsModel)
                 .environment(cleanModel)
                 .environment(optimizeModel)
@@ -38,5 +40,9 @@ struct MoleApp: App {
         }
         .defaultSize(width: 1120, height: 760)
         .windowResizability(.contentMinSize)
+    }
+
+    private var selectedLanguage: AppLanguage {
+        AppLanguage(rawValue: appLanguageRaw) ?? .english
     }
 }

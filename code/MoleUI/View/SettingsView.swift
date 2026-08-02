@@ -6,7 +6,7 @@ enum FullDiskAccessStatus: Equatable {
     case notGranted
     case unknown
 
-    var title: String {
+    var title: LocalizedStringKey {
         switch self {
         case .granted:
             "Full Disk Access appears enabled"
@@ -17,7 +17,7 @@ enum FullDiskAccessStatus: Equatable {
         }
     }
 
-    var detail: String {
+    var detail: LocalizedStringKey {
         switch self {
         case .granted:
             "Broad disk scans should be able to inspect protected Library content without repeated folder-by-folder interruptions."
@@ -141,12 +141,15 @@ enum FullDiskAccessHelper {
 }
 
 struct SettingsView: View {
+    @AppStorage("appLanguage") private var appLanguageRaw = AppLanguage.english.rawValue
+    @State private var draftLanguage = AppLanguage.english
     @State private var fullDiskAccessStatus = FullDiskAccessHelper.status()
 
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
                 heroCard
+                languageCard
                 aboutCard
                 permissionsCard
                 cliOnlyCard
@@ -154,7 +157,29 @@ struct SettingsView: View {
             .padding(16)
         }
         .onAppear {
+            draftLanguage = selectedLanguage
             refreshFullDiskAccessStatus()
+        }
+    }
+
+    private var languageCard: some View {
+        settingsCard(title: "Language", symbol: "globe") {
+            HStack(spacing: 12) {
+                Picker("Language", selection: $draftLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Spacer()
+
+                Button("Save") {
+                    appLanguageRaw = draftLanguage.rawValue
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(draftLanguage == selectedLanguage)
+            }
         }
     }
 
@@ -239,7 +264,7 @@ struct SettingsView: View {
     }
 
     private func settingsCard(
-        title: String,
+        title: LocalizedStringKey,
         symbol: String,
         @ViewBuilder content: () -> some View
     ) -> some View {
@@ -256,7 +281,7 @@ struct SettingsView: View {
         )
     }
 
-    private func settingsValueRow(_ label: String, _ value: String) -> some View {
+    private func settingsValueRow(_ label: LocalizedStringKey, _ value: String) -> some View {
         HStack {
             Text(label)
             Spacer()
@@ -266,7 +291,7 @@ struct SettingsView: View {
         }
     }
 
-    private func statusPill(title: String, detail: String, tint: Color) -> some View {
+    private func statusPill(title: LocalizedStringKey, detail: LocalizedStringKey, tint: Color) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Circle()
                 .fill(tint)
@@ -291,7 +316,7 @@ struct SettingsView: View {
         )
     }
 
-    private func permissionTip(title: String, detail: String) -> some View {
+    private func permissionTip(title: LocalizedStringKey, detail: LocalizedStringKey) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
@@ -302,7 +327,7 @@ struct SettingsView: View {
         }
     }
 
-    private func cliFeatureRow(_ command: String, _ description: String) -> some View {
+    private func cliFeatureRow(_ command: String, _ description: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(command)
                 .font(.system(.caption, design: .monospaced))
@@ -332,6 +357,10 @@ struct SettingsView: View {
         case .unknown:
             .orange
         }
+    }
+
+    private var selectedLanguage: AppLanguage {
+        AppLanguage(rawValue: appLanguageRaw) ?? .english
     }
 
     private func refreshFullDiskAccessStatus() {

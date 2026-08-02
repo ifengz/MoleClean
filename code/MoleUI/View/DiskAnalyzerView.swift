@@ -396,7 +396,7 @@ struct DiskAnalyzerView: View {
         requestScan(directory: directory, bypassPermissionGate: true)
     }
 
-    private var fullDiskAccessPromptDetail: String {
+    private var fullDiskAccessPromptDetail: LocalizedStringKey {
         switch fullDiskAccessStatus {
         case .granted:
             "Mole Clean now appears to have Full Disk Access. You can continue the Home-folder scan."

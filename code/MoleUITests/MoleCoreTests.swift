@@ -2,6 +2,14 @@ import Testing
 import Foundation
 @testable import Mole_Clean
 
+// MARK: - App Language
+
+@Test func appLanguageIdentifiersAreStable() {
+    #expect(AppLanguage.english.locale.identifier == "en")
+    #expect(AppLanguage.simplifiedChinese.locale.identifier == "zh-Hans")
+    #expect(AppLanguage(rawValue: "unsupported") == nil)
+}
+
 // MARK: - Version
 
 @Test func versionIsSet() {

@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AEF193D74543417B9EBA6DFA /* .mole-cli-version in Resources */ = {isa = PBXBuildFile; fileRef = 568727435DA94E75A6EF82BD /* .mole-cli-version */; };
+		A0C8D2C90000000000000001 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A0C8D2C90000000000000004 /* Localizable.strings */; };
 		113FB70FCAA54AFDF9BE58B9 /* MoleVersionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54D166A995F696C7B00CD5E3 /* MoleVersionView.swift */; };
 		29CB6268C931648AD2B865AF /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEB0C4BC3B51B5F199D3A140 /* DashboardView.swift */; };
 		2C817E67A1DE74722B48F95E /* InstallerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C1897658A5457CF58EF7BD /* InstallerView.swift */; };
@@ -28,6 +29,7 @@
 		ABB844CFA71DA286E6198BF2 /* SafetyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B5D757BF68A417AB45A5E9F /* SafetyController.swift */; };
 		B10B12EF48384CF315BCF0FD /* SudoHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD57E8C4DB424E21B6455F8 /* SudoHelper.swift */; };
 		B67F824EB3C3D06706C9EB76 /* MoleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA83B140E1CA8258B27D0DB7 /* MoleApp.swift */; };
+		A0C8D2C90000000000000005 /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C8D2C90000000000000006 /* Localization.swift */; };
 		BCBFFF98F7FF20357C08067B /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D318DDC275BE6B3CD128F65C /* ContentView.swift */; };
 		D455E75FE1409E6AB1A61E12 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61CA9DDCC7B13D144300AD0C /* SidebarView.swift */; };
 		A1F5C0DE00000000000000A2 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F5C0DE00000000000000A1 /* Theme.swift */; };
@@ -81,6 +83,9 @@
 		F3FA1BBA1A27FBCE12FAB812 /* MoleCoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoleCoreTests.swift; sourceTree = "<group>"; };
 		FA83B140E1CA8258B27D0DB7 /* MoleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoleApp.swift; sourceTree = "<group>"; };
 		FBD57E8C4DB424E21B6455F8 /* SudoHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SudoHelper.swift; sourceTree = "<group>"; };
+		A0C8D2C90000000000000006 /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
+		A0C8D2C90000000000000002 /* Localizable.strings (English) */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = Localizable.strings; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		A0C8D2C90000000000000003 /* Localizable.strings (Simplified Chinese) */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = Localizable.strings; path = zh-Hans.lproj/Localizable.strings; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -101,6 +106,7 @@
 				D91DD675B485F4BFABAAC40B /* DiskAnalyzerView.swift */,
 				43C1897658A5457CF58EF7BD /* InstallerView.swift */,
 				FA83B140E1CA8258B27D0DB7 /* MoleApp.swift */,
+				A0C8D2C90000000000000006 /* Localization.swift */,
 				54D166A995F696C7B00CD5E3 /* MoleVersionView.swift */,
 				E44E1B7E83866D954771C6A2 /* OptimizeView.swift */,
 				5A4F3BB22047802058591BBF /* PurgeView.swift */,
@@ -144,6 +150,7 @@
 			isa = PBXGroup;
 			children = (
 				24C213975ADB4EC643F4BF9D /* Assets.xcassets */,
+				A0C8D2C90000000000000004 /* Localizable.strings */,
 				A5E18C42B31B1A28D0F001B8 /* BundledBinaries.entitlements */,
 				E1F3FF625F606A6715FFC5C7 /* Info.plist */,
 				BB87FF57E870C70574208B01 /* MoleUI.entitlements */,
@@ -164,6 +171,18 @@
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXVariantGroup section */
+		A0C8D2C90000000000000004 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				A0C8D2C90000000000000002 /* Localizable.strings (English) */,
+				A0C8D2C90000000000000003 /* Localizable.strings (Simplified Chinese) */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin PBXNativeTarget section */
 		D0E28DBDD7145F9CFEA9B5D9 /* MoleUI */ = {
@@ -225,6 +244,7 @@
 			knownRegions = (
 				Base,
 				en,
+				zh-Hans,
 			);
 			mainGroup = E109190315663E6EDA56C08A;
 			minimizedProjectReferenceProxies = 1;
@@ -243,6 +263,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E7B5322A3242D44AE9DF7526 /* Assets.xcassets in Resources */,
+				A0C8D2C90000000000000001 /* Localizable.strings in Resources */,
 			
 				AEF193D74543417B9EBA6DFA /* .mole-cli-version in Resources */,);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -296,6 +317,7 @@
 				2C817E67A1DE74722B48F95E /* InstallerView.swift in Sources */,
 				AA44444444444444AAAAAAAA /* MetricsModel.swift in Sources */,
 				B67F824EB3C3D06706C9EB76 /* MoleApp.swift in Sources */,
+				A0C8D2C90000000000000005 /* Localization.swift in Sources */,
 				113FB70FCAA54AFDF9BE58B9 /* MoleVersionView.swift in Sources */,
 				AA55555555555555AAAAAAAA /* OptimizeModel.swift in Sources */,
 				F4589CC8DAEFA56B33CD550D /* OptimizeView.swift in Sources */,

@@ -15,6 +15,10 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         rawValue
     }
 
+    var title: LocalizedStringKey {
+        LocalizedStringKey(rawValue)
+    }
+
     var icon: String {
         switch self {
         case .status: "waveform.path.ecg"
@@ -48,11 +52,11 @@ struct MolePanelGroupBoxStyle: GroupBoxStyle {
 }
 
 struct MoleSectionHeader: View {
-    let title: String
-    let subtitle: String?
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey?
     let symbol: String
 
-    init(title: String, subtitle: String? = nil, symbol: String) {
+    init(title: LocalizedStringKey, subtitle: LocalizedStringKey? = nil, symbol: String) {
         self.title = title
         self.subtitle = subtitle
         self.symbol = symbol
@@ -71,7 +75,7 @@ struct MoleSectionHeader: View {
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundStyle(MoleTheme.ink)
 
-                if let subtitle, !subtitle.isEmpty {
+                if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -83,7 +87,7 @@ struct MoleSectionHeader: View {
 }
 
 struct MoleMetricBadge: View {
-    let title: String
+    let title: LocalizedStringKey
     let value: String
     let systemImage: String
     var tint: Color = MoleTheme.primary
@@ -97,7 +101,8 @@ struct MoleMetricBadge: View {
                 .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: MoleTheme.radiusSm, style: .continuous))
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(title.uppercased())
+                Text(title)
+                    .textCase(.uppercase)
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                 Text(value)
@@ -116,7 +121,7 @@ struct MoleMetricBadge: View {
 }
 
 struct MoleSearchField: View {
-    let prompt: String
+    let prompt: LocalizedStringKey
     @Binding var text: String
 
     var body: some View {
@@ -140,8 +145,18 @@ struct MoleSearchField: View {
 }
 
 struct MoleLoadingState: View {
-    let title: String
-    var subtitle: String?
+    let title: Text
+    var subtitle: Text?
+
+    init(title: LocalizedStringKey, subtitle: LocalizedStringKey? = nil) {
+        self.title = Text(title)
+        self.subtitle = subtitle.map { Text($0) }
+    }
+
+    init(title: String, subtitle: String? = nil) {
+        self.title = Text(verbatim: title)
+        self.subtitle = subtitle.map { Text(verbatim: $0) }
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -149,12 +164,12 @@ struct MoleLoadingState: View {
                 .controlSize(.large)
                 .progressViewStyle(.circular)
 
-            Text(title)
+            title
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(MoleTheme.ink)
 
-            if let subtitle, !subtitle.isEmpty {
-                Text(subtitle)
+            if let subtitle {
+                subtitle
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -164,16 +179,16 @@ struct MoleLoadingState: View {
 }
 
 struct MoleHeroPanel<Accessory: View>: View {
-    let eyebrow: String
-    let title: String
-    let subtitle: String
+    let eyebrow: LocalizedStringKey
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey
     let symbol: String
     private let accessory: Accessory
 
     init(
-        eyebrow: String,
-        title: String,
-        subtitle: String,
+        eyebrow: LocalizedStringKey,
+        title: LocalizedStringKey,
+        subtitle: LocalizedStringKey,
         symbol: String,
         @ViewBuilder accessory: () -> Accessory
     ) {
@@ -185,9 +200,9 @@ struct MoleHeroPanel<Accessory: View>: View {
     }
 
     init(
-        eyebrow: String,
-        title: String,
-        subtitle: String,
+        eyebrow: LocalizedStringKey,
+        title: LocalizedStringKey,
+        subtitle: LocalizedStringKey,
         symbol: String
     ) where Accessory == EmptyView {
         self.eyebrow = eyebrow
@@ -201,7 +216,8 @@ struct MoleHeroPanel<Accessory: View>: View {
         HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Text(eyebrow.uppercased())
+                    Text(eyebrow)
+                        .textCase(.uppercase)
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .tracking(0.8)
                         .foregroundStyle(MoleTheme.primary)

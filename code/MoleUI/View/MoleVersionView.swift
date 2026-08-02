@@ -101,7 +101,7 @@ struct MoleVersionView: View {
         }
     }
 
-    private func versionChip(title: String, value: String, systemImage: String, tint: Color) -> some View {
+    private func versionChip(title: LocalizedStringKey, value: String, systemImage: String, tint: Color) -> some View {
         HStack(spacing: 10) {
             Image(systemName: systemImage)
                 .foregroundStyle(tint)

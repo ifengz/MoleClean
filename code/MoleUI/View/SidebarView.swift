@@ -41,9 +41,10 @@ struct SidebarView: View {
         .padding(.horizontal, 4)
     }
 
-    private func sidebarSection(_ title: String, items: [SidebarItem]) -> some View {
+    private func sidebarSection(_ title: LocalizedStringKey, items: [SidebarItem]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title.uppercased())
+            Text(title)
+                .textCase(.uppercase)
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .tracking(0.8)
                 .foregroundStyle(MoleTheme.primary)
@@ -69,7 +70,7 @@ struct SidebarView: View {
                     .foregroundStyle(isSelected ? Color.white : MoleTheme.primary)
                     .frame(width: 24, height: 24)
 
-                Text(item.rawValue)
+                Text(item.title)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(isSelected ? Color.white : MoleTheme.ink)
 
