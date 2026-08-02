@@ -109,3 +109,14 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   build
 ```
+
+## 首次打开提示
+
+如果 macOS 因为下载来源或隔离属性阻止打开已经确认可信的 App，可以移除该 App 的
+quarantine 属性：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Mole Clean.app"
+```
+
+只对确认来自本仓库构建流程或可信来源的 `Mole Clean.app` 使用此命令。执行后重新打开 App。
