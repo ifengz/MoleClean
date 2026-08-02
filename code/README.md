@@ -186,7 +186,13 @@ MoleUI/
 
 ## Troubleshooting
 
-**App won't open:** Right-click → Open, or run `xattr -cr "/Applications/Mole Clean.app"`
+**App won't open:** Right-click → Open. If macOS still blocks a trusted app because of its quarantine attribute, run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Mole Clean.app"
+```
+
+Only run this command for an app downloaded from a trusted source or built by this repository. See [`docs/build.md`](../docs/build.md) for the full build and release workflow.
 
 **Dashboard not loading:** Restart the app. If issue persists, check Console.app for errors.
 
