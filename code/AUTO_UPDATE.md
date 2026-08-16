@@ -2,7 +2,7 @@
 
 MoleUI vendors upstream Mole CLI into `Resources/mole` and uses GitHub Actions to detect new upstream releases, rebuild the bundled Go binaries, run compatibility checks, and then either open a PR or raise a breaking-change issue.
 
-This workflow **does not auto-merge PRs or create release tags anymore**. Release packaging stays in the separate [`.github/workflows/release.yml`](.github/workflows/release.yml) workflow and still requires a tag push or manual trigger.
+This workflow creates a temporary PR only after compatibility checks and the license/trademark gate pass, dispatches repository CI for that branch, then squash-merges the PR and triggers [`.github/workflows/release.yml`](.github/workflows/release.yml) to produce an unsigned DMG artifact. It does not create release tags or publish a GitHub Release automatically.
 
 ## Workflow
 
@@ -15,11 +15,11 @@ Rebuild status-go / analyze-go
     ↓
 Compatibility Check
     ↓
-    ├─ Compatible → Update versions → Create PR → Normal repo CI → Maintainer merge
+    ├─ Compatible + legal files unchanged → Update versions → Create PR → Normal repo CI → Auto merge → Test DMG artifact
     └─ Incompatible → Create Issue for manual adaptation
 
-After merge:
-    Manual tag or workflow_dispatch → release.yml → signed/notarized DMG
+For a public signed release:
+    Manual tag → release.yml → signed/notarized DMG → GitHub Release
 ```
 
 ## 1. Automatic Update Detection
@@ -122,17 +122,17 @@ If compatibility checks pass:
    - Build & Test
    - Security Scan
 
-4. **Maintainer Review and Merge**
-   The current workflow stops at PR creation. A maintainer still decides whether to merge.
+4. **Automatic Merge and Test DMG**
+   The workflow dispatches CI for the temporary update branch. Only when that CI succeeds does it squash-merge the PR, delete the temporary branch, and trigger `release.yml` to upload an unsigned DMG artifact.
 
-5. **Optional Release Tag**
+5. **Optional Public Release Tag**
    After merge, create a tag manually if you want to ship a DMG immediately:
    ```bash
    git tag -a "v{moleui_version}" -m "Release v{moleui_version}"
    git push origin "v{moleui_version}"
    ```
 
-6. **Release Workflow**
+6. **Public Release Workflow**
    Tag push triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
    - archives the app
    - bundles `Resources/mole`
@@ -343,14 +343,14 @@ gh pr create --title "Update Mole CLI to $NEW_CLI_VERSION (MoleUI $NEW_MOLEUI_VE
 **Symptom:** PR exists and CI is green, but no DMG release was created
 
 **Expected Behavior:**
-- The auto-update workflow stops after opening the PR
-- A maintainer still needs to merge it
-- A release still needs a tag push or a manual `release.yml` trigger
+- The auto-update workflow merges only after the dispatched CI succeeds
+- It then triggers `release.yml` to upload an unsigned DMG artifact
+- A public signed release still needs a tag push and signing secrets
 
 **Solution:**
-1. Merge the PR after review
-2. Push a `v...` tag if you want a release build
-3. Or trigger [`.github/workflows/release.yml`](.github/workflows/release.yml) manually
+1. Inspect the failed compatibility, CI, or DMG build run
+2. Fix the failure and rerun the update workflow
+3. Push a `v...` tag only when you want a public signed release
 
 ## 8. Security Considerations
 
@@ -358,7 +358,7 @@ gh pr create --title "Update Mole CLI to $NEW_CLI_VERSION (MoleUI $NEW_MOLEUI_VE
 
 - ✅ PR is only created if compatibility checks pass
 - ✅ Normal repository CI still runs before merge
-- ✅ Manual review remains in the loop for upstream integration changes
+- ✅ License and trademark changes stop the workflow for manual review
 - ✅ Breaking upstream changes create an issue instead of silently updating the bundle
 
 ### 8.2 Version Validation

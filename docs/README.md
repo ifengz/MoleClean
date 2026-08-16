@@ -19,7 +19,7 @@ MoleCleaner 是一个尚未开始实现的 macOS 清理工具方案：以
 
 - 可以基于 MoleUI 修改 UI，同时持续跟随 Mole 的正式 release。
 - UI 与 Mole 引擎必须通过单一 `MoleCoreAdapter` seam 交互；View 不直接拼 Shell，也不直接解析终端文本。
-- Mole 引擎固定到明确的 tag、commit 和校验和；自动任务只创建升级 PR，不自动合并。
+- Mole 引擎固定到明确的 tag、commit 和校验和；兼容性、许可证/商标门禁与 CI 都通过的自动升级 PR 会自动合并，并生成测试 DMG artifact。
 - 先修复引擎更新与合约测试，再改 UI。否则会继续扩大对旧内核的依赖。
 - 发行新版 Mole 引擎前必须处理 GPL-3.0 和 Mole 商标要求。
 

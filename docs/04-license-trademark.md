@@ -77,7 +77,7 @@ FSF 的 [GPL FAQ：aggregate 与组合程序](https://www.gnu.org/licenses/gpl-f
 
 ## 每次上游更新的许可证门禁
 
-自动化只能发现新 release 并创建 PR，不能自动合并。更新 PR 必须同时验证：
+自动化只在许可证/商标文件未变化、兼容性与 CI 均通过时自动合并并生成测试 DMG；一旦 `LICENSE` 或 `TRADEMARK.md` 变化，必须停止并转人工处理。更新必须同时验证：
 
 1. 固定 tag、commit SHA 和下载制品 SHA-256；
 2. 比对 `LICENSE`、`TRADEMARK.md`、`NOTICE`、依赖清单和发布说明；

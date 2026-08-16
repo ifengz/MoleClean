@@ -90,9 +90,9 @@ preview/execute plan digest 与文件身份不一致时明确拒绝执行；废�
 目标：让上游更新持续可维护，而不是再次停在旧版本。
 
 - 定时检测 Mole 正式 release。
-- Bot 更新 vendor 与 lock，只创建 PR。
+- Bot 更新 vendor 与 lock，兼容性、许可证/商标门禁与 CI 都通过后自动合并。
 - CI 执行 schema、parser、fixture、架构、签名和零写入测试。
-- 人工审核后合并并签名、公证 DMG。
+- 自动生成未签名测试 DMG；签名、公证和公开 Release 仍由人工发布流程处理。
 - release 同时发布对应源码、许可证和校验和。
 
 验收：发现上游新版本后能稳定形成一个可审阅 PR；合约失败时明确阻止发布。

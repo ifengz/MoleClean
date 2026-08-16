@@ -34,7 +34,7 @@ MoleUI 已由自动任务创建
 4. 执行文件存在性、JSON 可解析和各命令 `--dry-run` 冒烟检查。
 5. 兼容时更新两个版本标记并创建 PR；不兼容时创建 Issue。
 
-这个 workflow **不会自动合并 PR**，这一点应保留。当前缺口是：
+当前 workflow 只在兼容性、许可证/商标门禁和 CI 都通过后自动合并更新 PR，并生成未签名测试 DMG artifact；它不会自动创建公开 Release。当前缺口是：
 
 - 只记录易漂移的版本字符串，没有锁定 tag 对应 commit 和下载制品 SHA-256。
 - 两个版本文件依赖同步写入，仍可能出现显示版本与实际 vendor 不一致。
@@ -72,7 +72,7 @@ MoleUI 已由自动任务创建
 4. 输出上游 release notes、vendor diff、许可证及商标文件变化。
 5. 运行全部合约测试；通过后创建升级 PR，失败则创建阻塞 Issue。
 
-明确禁止 bot 自动 merge。合约通过只是进入人工审核的条件，不是自动发布授权。
+自动化只生成未签名测试 DMG，不创建公开 Release 或 release tag。`LICENSE`、`TRADEMARK.md` 或合约门禁变化时必须停止并转人工处理。
 
 ### 3. vendor snapshot 优先
 
@@ -118,8 +118,8 @@ MoleUI 已由自动任务创建
 - [ ] 新旧引擎均通过同一组 Adapter 合约测试。
 - [ ] Dry Run 零写入、危险路径、部分失败和取消测试通过，且无跳过项。
 - [ ] arm64、x86_64 helper 与最终 App 的签名、公证前检查通过。
-- [ ] 至少一名人工审核者确认 Adapter 行为和删除计划没有静默变化。
-- [ ] bot、workflow 和分支保护均未启用自动 merge。
+- [ ] 自动化只在兼容性、许可证/商标门禁和 CI 都通过后合并；其他情况创建阻塞 Issue。
+- [ ] bot 不自动创建公开 Release 或 release tag。
 - [ ] App 内可显示所用 Mole tag、commit，并能追溯到对应源码。
 
 ## 回滚策略

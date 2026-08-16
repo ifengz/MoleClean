@@ -71,7 +71,7 @@ adapter 必须使用参数数组启动进程，不经过 `/bin/sh -c`；路径�
 - `Resources/mole` 由固定 runtime manifest 从该快照生成，只包含运行所需文件、许可证和 notices。
 - 禁止构建时下载 `latest` 或跟随 `main`。
 - 同时记录 release tag、commit SHA 和制品 SHA-256；App 展示的版本必须读取同一份元数据，禁止维护两份手写版本号。
-- 自动化只负责发现新 release 并创建更新 PR，不自动合并。
+- 自动化在兼容性、许可证/商标门禁和 CI 都通过后合并更新 PR，并生成测试 DMG artifact。
 - 更新 PR 必须展示 vendor diff、许可证变化和协议兼容性测试结果。
 - 只有通过 preview、执行安全性及回滚验证后，才能更新固定版本。
 

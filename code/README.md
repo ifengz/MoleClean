@@ -136,13 +136,13 @@ Quick start:
 
 ## Auto-Update System
 
-MoleUI implements a complete auto-update workflow that automatically detects, validates, and releases new versions when upstream Mole CLI updates. See [AUTO_UPDATE.md](AUTO_UPDATE.md) for details on:
+MoleUI implements a complete auto-update workflow that automatically detects, validates, merges compatible updates, and builds a test DMG when upstream Mole CLI updates. See [AUTO_UPDATE.md](AUTO_UPDATE.md) for details on:
 - Automatic compatibility checking
-- Auto-merge and auto-release workflow
+- Auto-merge and test-DMG workflow
 - Version number synchronization
 - User-facing update notifications
 
-Mole Clean will continue to follow official Mole CLI releases. Each upstream release is fetched, compatibility-checked, bundled, and validated by CI before it is shipped in a new Mole Clean release. Updating the upstream CLI does not change an installed app until that new Mole Clean release is built and installed.
+Mole Clean will continue to follow official Mole CLI releases. Each compatible update is fetched, validated by CI, merged, and built into a test DMG artifact. A public signed release still requires a release tag and signing credentials.
 
 ## Architecture
 

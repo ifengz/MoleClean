@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
   issues: write
@@ -208,6 +209,14 @@ jobs:
           fi
 
           if [ -z "$ERRORS" ]; then
+            for legal_file in code/Resources/mole/LICENSE code/Resources/mole/TRADEMARK.md; do
+              if ! git diff --quiet HEAD -- "$legal_file"; then
+                ERRORS="$ERRORS\n- Manual review required: upstream $legal_file changed"
+              fi
+            done
+          fi
+
+          if [ -z "$ERRORS" ]; then
             echo "compatible=true" >> $GITHUB_OUTPUT
           else
             echo "compatible=false" >> $GITHUB_OUTPUT
@@ -233,6 +242,7 @@ jobs:
 
       - name: Create PR (compatible)
         if: steps.check_update.outputs.update_needed == 'true' && steps.compat.outputs.compatible == 'true'
+        id: create_pr
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -258,6 +268,33 @@ jobs:
             **Upstream Release Notes:**
             https://github.com/tw93/Mole/releases/tag/${{ steps.latest_release.outputs.tag }}
           labels: dependencies,automated
+
+      - name: Run CI, merge compatible PR, and build DMG
+        if: steps.check_update.outputs.update_needed == 'true' && steps.compat.outputs.compatible == 'true' && steps.create_pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER="${{ steps.create_pr.outputs.pull-request-number }}"
+          BRANCH="auto-update-mole-${{ steps.latest_release.outputs.version }}"
+
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+
+          for attempt in {1..20}; do
+            CI_RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
+            if [ -n "$CI_RUN_ID" ]; then
+              break
+            fi
+            sleep 3
+          done
+
+          if [ -z "${CI_RUN_ID:-}" ]; then
+            echo "Unable to find the CI run for $BRANCH"
+            exit 1
+          fi
+
+          gh run watch "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --delete-branch
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main/blue-theme
 
       - name: Create Issue (breaking)
         if: steps.check_update.outputs.update_needed == 'true' && steps.compat.outputs.compatible == 'false'

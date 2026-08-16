@@ -61,9 +61,13 @@ auto-update-*     Mole CLI 内核升级时临时创建的分支
 5. 点击 `Run workflow`。
 
 workflow 会检查上游 Mole 正式版本，更新内核并执行兼容性检查。检查通过后会创建临时
-`auto-update-mole-*` 分支，并创建目标为 `main/blue-theme` 的 PR。
+`auto-update-mole-*` 分支和目标为 `main/blue-theme` 的 PR，再对该分支运行 CI。
 
-确认 PR 后合并到 `main/blue-theme`，再删除对应的临时分支。
+CI 全部通过后，workflow 会自动 squash merge 该更新 PR、删除临时分支，并自动触发
+`Build & Release` 生成未签名 DMG artifact。兼容性、CI 或 DMG 构建任一步失败都会停止，
+不会合并或创建公开 Release。
+
+上游 `LICENSE` 或 `TRADEMARK.md` 有变化时也会停止，并创建 Issue 等待人工处理。
 
 首次使用前，需要在仓库 `Settings` -> `Actions` -> `General` 的 `Workflow permissions` 中选择
 `Read and write permissions`，并勾选 `Allow GitHub Actions to create and approve pull requests`。
