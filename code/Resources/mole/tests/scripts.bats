@@ -46,7 +46,44 @@ setup() {
     [ -x "$PROJECT_ROOT/scripts/check.sh" ]
 
     run /bin/bash -c "grep -q 'Mole Check' '$PROJECT_ROOT/scripts/check.sh'"
-    [ "$status" -eq 0 ]
+	[ "$status" -eq 0 ]
+}
+
+@test "diagnostic guidance check rejects equivalent pipe-to-shell spellings across lines" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+eval "$(sed -n '/^check_diagnostic_guidance()/,/^}/p' "$PROJECT_ROOT/scripts/check.sh")"
+
+safe="$HOME/safe-guidance.md"
+cat > "$safe" <<'SAFE'
+Download `Mole-Diagnose.command` with `curl -o`, inspect it, then open it manually.
+SAFE
+check_diagnostic_guidance "$safe"
+
+assert_unsafe() {
+	local name="$1"
+	local guidance="$2"
+	local unsafe="$HOME/unsafe-${name}.md"
+	printf '%s\n' "$guidance" > "$unsafe"
+	if check_diagnostic_guidance "$unsafe"; then
+		echo "UNEXPECTED_UNSAFE_PASS:$name"
+		exit 1
+	fi
+}
+
+assert_unsafe path '`curl https://example.test/Mole-Diagnose.command | /bin/bash`'
+assert_unsafe command '`curl https://example.test/Mole-Diagnose.command | command bash`'
+assert_unsafe sudo '`curl https://example.test/Mole-Diagnose.command | sudo -u root bash`'
+assert_unsafe env $'`curl https://example.test/Mole-Diagnose.command \\\n  | env MODE=1 zsh`'
+assert_unsafe tee $'`curl https://example.test/Mole-Diagnose.command |\n  tee /tmp/diagnose | dash`'
+assert_unsafe quoted "\`curl https://example.test/Mole-Diagnose.command | 'bash'\`"
+assert_unsafe ansi_c "\`curl https://example.test/Mole-Diagnose.command | \$'bash'\`"
+assert_unsafe ksh '`curl https://example.test/Mole-Diagnose.command | ksh`'
+assert_unsafe escaped '`curl https://example.test/Mole-Diagnose.command | ba\sh`'
+EOF
+
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" != *"UNEXPECTED_UNSAFE_PASS:"* ]]
 }
 
 @test "test.sh script exists and is valid" {
@@ -164,8 +201,12 @@ EOF
 }
 
 @test "install.sh supports dev branch installs" {
-    run /bin/bash -c "grep -q 'refs/heads/dev.tar.gz' '$PROJECT_ROOT/install.sh'"
-    [ "$status" -eq 0 ]
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+eval "$(sed -n '/^source_archive_url()/,/^}/p' "$PROJECT_ROOT/install.sh")"
+[[ "$(source_archive_url dev "")" == "https://github.com/tw93/mole/archive/refs/heads/dev.tar.gz" ]]
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     run /bin/bash -c "grep -q 'MOLE_VERSION=\"dev\"' '$PROJECT_ROOT/install.sh'"
     [ "$status" -eq 0 ]
 }
@@ -183,4 +224,17 @@ EOF
     [ "$status" -ne 0 ]
     run grep -q 'Homebrew Core PR is workflow-driven' "$PROJECT_ROOT/.claude/skills/release-notes/SKILL.md"
     [ "$status" -eq 0 ]
+}
+
+@test "no shell function shares another's body under a different name" {
+    # This gate also lives in check.sh, but CI runs scripts/test.sh and never
+    # check.sh, so without this case it could not block a pull request. The
+    # class it catches is invisible to grep: the copies that matter have
+    # already had their variables renamed, which is why review reads them as
+    # separate helpers. Run the script with --list to inspect every group.
+    run python3 "$PROJECT_ROOT/scripts/audit_function_duplication.py"
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
 }

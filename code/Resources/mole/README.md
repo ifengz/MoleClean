@@ -145,8 +145,6 @@ Uninstalling: Photoshop 2024
     - Logs, WebKit storage, Cookies
     - Extensions, Plugins, Launch daemons
 
-Note: On macOS 15 and later, Local Network permission entries can outlive app removal. Mole warns when an uninstalled app declares Local Network usage, but it does not auto-reset `/Volumes/Data/Library/Preferences/com.apple.networkextension*.plist` because that reset is global and requires Recovery mode.
-
 ====================================================================
 Space freed: 12.8GB
 ====================================================================
@@ -159,19 +157,21 @@ $ mo optimize
 
 System: 5/32 GB RAM | 333/460 GB Disk (72%) | Uptime 6d
 
-  ✓ Rebuild system databases and clear caches
-  ✓ Reset network services
-  ✓ Refresh Finder and Dock
-  ✓ Clean diagnostic and crash logs
-  ✓ Remove swap files and restart dynamic pager
-  ✓ Rebuild launch services and spotlight index
+  ✓ Inspect and repair supported system maintenance items
+  ✓ Refresh eligible Finder, network, and database state
+  ✓ Skip tasks that are unnecessary, unsafe now, or unavailable
 
 ====================================================================
-System optimization completed
+Optimization Complete
 ====================================================================
+Applied 8 optimizations
+9 unchanged | 4 skipped | 2 unavailable
+Optimization pass complete
+```
 
 Use `mo optimize --whitelist` to exclude specific optimizations. Path patterns work too, so you can keep a long-lived mounted disk image around (for example `/Volumes/mail`) without it showing up as a detach candidate.
-```
+
+Optimize results depend on the Mac's current state and available system tools, so the counts above are illustrative rather than fixed.
 
 ### Disk Space Analyzer
 

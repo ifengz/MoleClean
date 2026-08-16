@@ -31,18 +31,30 @@ teardown_file() {
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/app_caches.sh"
-pgrep() { return 0; }
+    pgrep() { [[ "$1" == "-x" && "$2" == "xcodebuild" ]]; }
 safe_clean() { echo "$2"; }
 clean_xcode_tools
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Xcode DerivedData/Documentation · skipped (Xcode running)"* ]] || return 1
+    [[ "$output" != *"Xcode DerivedData · skipped"* ]] || return 1
     [[ "$output" != *"derived data"* ]] || return 1
     [[ "$output" != *"documentation cache"* ]]
 }
 
-@test "clean_xcode_tools cleans documentation caches but not archives when Xcode is not running" {
+@test "clean_xcode_tools preserves device logs and user documentation stores" {
+    local ios_log="$HOME/Library/Developer/Xcode/iOS Device Logs/sentinel.log"
+    local watch_log="$HOME/Library/Developer/Xcode/watchOS Device Logs/sentinel.log"
+    local doc_cache="$HOME/Library/Developer/Xcode/DocumentationCache/sentinel.doc"
+    local doc_index="$HOME/Library/Developer/Xcode/DocumentationIndex/sentinel.index"
+    mkdir -p "$(dirname "$ios_log")" "$(dirname "$watch_log")" \
+        "$(dirname "$doc_cache")" "$(dirname "$doc_index")"
+    touch "$ios_log" "$watch_log" "$doc_cache" "$doc_index"
+    mkdir -p "$HOME/Library/Caches/com.apple.dt.Xcode"
+    mkdir -p "$HOME/Library/Developer/Xcode/Products"
+    touch "$HOME/Library/Caches/com.apple.dt.Xcode/candidate"
+    touch "$HOME/Library/Developer/Xcode/Products/candidate"
+
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
@@ -53,12 +65,226 @@ clean_xcode_tools
 EOF
 
     [ "$status" -eq 0 ]
-    # clean_xcode_tools does not touch DerivedData (that is clean_xcode_derived_data),
-    # so assert the documentation cache this test is actually named for.
-    [[ "$output" == *"Xcode documentation cache"* ]] || return 1
+    # Xcode cache and build products are positive controls proving the cleanup
+    # body ran; diagnostics and downloaded documentation must stay review-only.
+    [[ "$output" == *"Xcode cache"* ]] || return 1
+    [[ "$output" == *"Xcode build products"* ]] || return 1
+    [[ "$output" != *"iOS device logs"* ]] || return 1
+    [[ "$output" != *"watchOS device logs"* ]] || return 1
+    [[ "$output" != *"Xcode documentation cache"* ]] || return 1
+    [[ "$output" != *"Xcode documentation index"* ]] || return 1
     [[ "$output" != *"Xcode archives"* ]] || return 1
-    [[ "$output" == *"Xcode documentation cache"* ]] || return 1
-    [[ "$output" == *"Xcode documentation index"* ]]
+    [[ -f "$ios_log" && -f "$watch_log" && -f "$doc_cache" && -f "$doc_index" ]]
+}
+
+@test "clean_xcode_tools skips Xcode paths while xcodebuild is active" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() { [[ "$2" == "xcodebuild" ]]; }
+safe_clean() {
+    case "${!#}" in
+        "Xcode cache" | "Xcode build products") echo "UNEXPECTED_XCODE_CLEAN:${!#}" ;;
+    esac
+}
+clean_xcode_tools
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"Xcode cache/build products · skipped"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_XCODE_CLEAN"* ]]
+}
+
+@test "clean_xcode_tools fails closed when process state is unknown" {
+    mkdir -p "$HOME/Library/Caches/com.apple.dt.Xcode"
+    touch "$HOME/Library/Caches/com.apple.dt.Xcode/candidate"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() { return 2; }
+safe_clean() { echo "UNEXPECTED_CLEAN:${!#}"; }
+clean_xcode_tools
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"process state unknown"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]]
+}
+
+@test "clean_3d_tools defers Autodesk cache while Fusion helper is active (#1390)" {
+    mkdir -p "$HOME/Library/Caches/com.autodesk.AcCoreConsole"
+    touch "$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() { return 0; }
+safe_clean() {
+    case "${!#}" in
+        "Autodesk cache") echo "UNEXPECTED_CLEAN:${!#}" ;;
+    esac
+}
+mole_defer_cleanup_family() { echo "DEFER:$1"; }
+note_activity() { :; }
+clean_3d_tools
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"DEFER:Autodesk"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]]
+}
+
+@test "clean_3d_tools cleans Autodesk cache when Fusion is not running (#1390)" {
+    mkdir -p "$HOME/Library/Caches/com.autodesk.AcCoreConsole"
+    touch "$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() { return 1; }
+safe_clean() { echo "CLEAN:${!#}"; }
+clean_3d_tools
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"CLEAN:Autodesk cache"* ]] || return 1
+}
+
+@test "clean_xcode_tools does not defer empty Xcode and Simulator roots" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+rm -rf "$HOME/Library/Caches/com.apple.dt.Xcode" \
+    "$HOME/Library/Developer/Xcode/Products" \
+    "$HOME/Library/Developer/Xcode/DerivedData" \
+    "$HOME/Library/Developer/CoreSimulator/Caches" \
+    "$HOME/Library/Developer/CoreSimulator/Devices" \
+    "$HOME/Library/Logs/CoreSimulator"
+mkdir -p "$HOME/Library/Caches/com.apple.dt.Xcode" \
+    "$HOME/Library/Developer/Xcode/Products" \
+    "$HOME/Library/Developer/Xcode/DerivedData" \
+    "$HOME/Library/Developer/CoreSimulator/Caches" \
+    "$HOME/Library/Developer/CoreSimulator/Devices" \
+    "$HOME/Library/Logs/CoreSimulator"
+pgrep() { return 0; }
+defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+safe_clean() { echo "UNEXPECTED_CLEAN:${!#}"; }
+clean_xcode_tools
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]] || return 1
+    [[ "$output" != *"process state unknown"* ]]
+}
+
+@test "clean_xcode_tools does not defer broken-symlink-only Xcode roots" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+rm -rf "$HOME/Library/Caches/com.apple.dt.Xcode" \
+    "$HOME/Library/Developer/Xcode/Products" \
+    "$HOME/Library/Developer/Xcode/DerivedData"
+mkdir -p "$HOME/Library/Caches/com.apple.dt.Xcode"
+ln -s "$HOME/missing-xcode-cache" "$HOME/Library/Caches/com.apple.dt.Xcode/broken"
+mkdir -p "$HOME/Library/Caches/com.apple.dt.Xcode/compiled/com.apple.e5rt.e5bundlecache"
+pgrep() { return 0; }
+defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+safe_clean() { echo "UNEXPECTED_CLEAN:${!#}"; }
+clean_xcode_tools
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]]
+}
+
+@test "clean_xcode_tools does not defer after a cache-only pass completes" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+rm -rf "$HOME/Library/Caches/com.apple.dt.Xcode" \
+    "$HOME/Library/Developer/Xcode/Products" \
+    "$HOME/Library/Developer/Xcode/DerivedData"
+mkdir -p "$HOME/Library/Caches/com.apple.dt.Xcode"
+touch "$HOME/Library/Caches/com.apple.dt.Xcode/candidate"
+
+probe_round=0
+_xcode_cleanup_process_state() {
+    probe_round=$((probe_round + 1))
+    [[ $probe_round -gt 2 ]] && return 0
+    return 1
+}
+_app_cache_safe_clean_guarded() {
+    local state=0
+    _xcode_cleanup_process_state || state=$?
+    [[ $state -eq 1 ]] || return 75
+    command rm -f "$HOME/Library/Caches/com.apple.dt.Xcode/candidate"
+    echo "CLEANED:Xcode cache"
+}
+defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+clean_xcode_tools
+[[ ! -e "$HOME/Library/Caches/com.apple.dt.Xcode/candidate" ]] || exit 1
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"CLEANED:Xcode cache"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]]
+}
+
+@test "clean_xcode_tools ignores active whitelist-only candidates" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+rm -rf "$HOME/Library/Caches/com.apple.dt.Xcode" \
+    "$HOME/Library/Developer/Xcode/Products" \
+    "$HOME/Library/Developer/Xcode/DerivedData"
+mkdir -p "$HOME/Library/Caches/com.apple.dt.Xcode"
+target="$HOME/Library/Caches/com.apple.dt.Xcode/whitelisted"
+touch "$target"
+is_path_whitelisted() { [[ "$1" == "$target" ]]; }
+pgrep() { return 0; }
+defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+safe_clean() { echo "UNEXPECTED_CLEAN:${!#}"; }
+clean_xcode_tools
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]]
 }
 
 @test "clean_xcode_tools does not duplicate unavailable simulator cleanup" {
@@ -66,6 +292,48 @@ EOF
 
     [ "$status" -eq 1 ]
     [ -z "$output" ]
+}
+
+@test "standalone guarded app-cache cleanup rechecks before falling back to safe_clean" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+unset -f safe_clean_guarded 2> /dev/null || true
+deny_delete() { return 1; }
+safe_clean() { echo "UNEXPECTED_SAFE_CLEAN"; }
+note_activity() { :; }
+
+rc=0
+_app_cache_safe_clean_guarded deny_delete "Guarded cache" "$HOME/cache" "Guarded cache" || rc=$?
+[[ $rc -ne 0 ]] || exit 1
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"UNEXPECTED_SAFE_CLEAN"* ]] || return 1
+}
+
+@test "standalone simulator probe ignores idle launchd services" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() {
+    [[ "$1" == "-x" && ("$2" == "CoreSimulatorService" || "$2" == "simdiskimaged") ]]
+}
+
+probe_status=0
+_simulator_cleanup_process_state || probe_status=$?
+[[ $probe_status -eq 1 ]] || exit 1
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
 }
 
 @test "clean_media_players protects spotify offline cache when bnk has content" {
@@ -177,8 +445,88 @@ clean_final_cut_pro_generated_caches
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Final Cut Pro generated caches · skipped (Final Cut Pro running)"* ]] || return 1
+    [[ "$output" != *"Final Cut Pro generated caches · skipped"* ]] || return 1
     [[ "$output" != *"unexpected safe_clean"* ]]
+}
+
+@test "clean_final_cut_pro_generated_caches does not defer whitelist-only targets" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+
+target="$HOME/Movies/Whitelisted.fcpbundle/Event/Render Files/High Quality Media"
+mkdir -p "$target"
+touch "$target/render.mov"
+should_protect_path() { return 1; }
+is_path_whitelisted() { [[ "$1" == "$target" ]]; }
+pgrep() { return 0; }
+defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+safe_clean() { echo "UNEXPECTED_CLEAN:${!#}"; }
+clean_final_cut_pro_generated_caches
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]]
+}
+
+@test "clean_final_cut_pro_generated_caches rechecks activity after sizing" {
+    run env HOME="$HOME/fcp-size-race" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+target="$HOME/Movies/Race.fcpbundle/Event/Render Files/High Quality Media"
+mkdir -p "$target"
+touch "$target/render.mov"
+pgrep() {
+    [[ -e "$HOME/fcp-started" ]] && return 0
+    return 1
+}
+get_cleanup_path_size_kb() {
+    : > "$HOME/fcp-started"
+    echo 1
+}
+safe_remove() { echo "UNEXPECTED_DELETE:$1"; return 0; }
+rm -f "$HOME/fcp-started"
+clean_final_cut_pro_generated_caches
+[[ -f "$target/render.mov" ]] || exit 1
+printf 'DEFER:%s\n' "$(format_deferred_cleanup_families)"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"UNEXPECTED_DELETE"* ]] || return 1
+    [[ "$output" == *"DEFER:Final Cut Pro"* ]]
+}
+
+@test "clean_final_cut_pro_generated_caches fails closed when its process probe errors" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+
+target="$HOME/Movies/Project.fcpbundle/Event/Render Files/High Quality Media"
+mkdir -p "$target"
+touch "$target/sentinel"
+pgrep() { return 2; }
+safe_clean() { echo "UNEXPECTED_SAFE_CLEAN:${!#}"; }
+note_activity() { :; }
+
+clean_final_cut_pro_generated_caches
+[[ -f "$target/sentinel" ]] || exit 1
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"Final Cut Pro generated caches · skipped (process state unknown)"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_SAFE_CLEAN"* ]]
 }
 
 @test "clean_jianying_pro_generated_caches targets only whitelisted regenerable subdirs" {
@@ -412,8 +760,8 @@ clean_ai_apps
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Codex Desktop state · preserved (sessions, credentials)"* ]] || return 1
-    [[ "$output" == *"NOTE_ACTIVITY"* ]] || return 1
+    [[ "$output" != *"Codex Desktop state"* ]] || return 1
+    [[ "$output" != *"NOTE_ACTIVITY"* ]] || return 1
     [[ "$output" != *"Codex cache"* ]] || return 1
     [[ "$output" != *"Codex CLI logs"* ]]
 }
@@ -910,4 +1258,149 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" != *"Raycast"* ]] && [[ "$output" != *"raycast"* ]]
+}
+
+@test "Xcode DerivedData cleanup propagates a size timeout before deletion" {
+    local isolated_home="$HOME/xcode-derived-timeout"
+    mkdir -p "$isolated_home/Library/Developer/Xcode/DerivedData/App-abc"
+
+    run env HOME="$isolated_home" PROJECT_ROOT="$PROJECT_ROOT" \
+        MOLE_CURRENT_COMMAND=clean /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+DRY_RUN=false
+MOLE_CLEAN_CANCEL_STATUS=0
+_xcode_cleanup_process_state() { return 1; }
+get_path_size_kb() { return 124; }
+safe_remove() { echo "UNEXPECTED_DELETE:$1"; }
+set +e
+clean_xcode_derived_data
+rc=$?
+set -e
+printf 'SIZE_RC:%s CANCEL:%s\n' "$rc" "$MOLE_CLEAN_CANCEL_STATUS"
+[[ $rc -eq 124 && $MOLE_CLEAN_CANCEL_STATUS -eq 124 ]]
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SIZE_RC:124 CANCEL:124"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DELETE"* ]]
+}
+
+@test "clean_3d_tools skips Autodesk cache while AcCoreConsole is running (#1390)" {
+    mkdir -p "$HOME/Library/Caches/com.autodesk.AcCoreConsole"
+    touch "$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db"
+    touch "$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db-shm"
+    touch "$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db-wal"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() {
+    if [[ "$*" == *AcCoreConsole* ]] || [[ "$*" == *com.autodesk.* ]]; then
+        return 0
+    fi
+    return 1
+}
+safe_clean() {
+    local desc="${*: -1}"
+    case "$desc" in
+        "Autodesk cache") echo "UNEXPECTED_AUTODESK:$desc" ;;
+    esac
+}
+safe_clean_guarded() { echo "UNEXPECTED_GUARDED:$*"; }
+mole_defer_cleanup_family() { echo "DEFER:$1"; }
+note_activity() { :; }
+clean_3d_tools
+INNER
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DEFER:Autodesk"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_AUTODESK"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_GUARDED"* ]] || return 1
+    [[ -f "$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db" ]]
+}
+
+@test "clean_3d_tools removes Autodesk cache when no Autodesk process is running" {
+    rm -rf "$HOME/Library/Caches/com.autodesk.AcCoreConsole"
+    mkdir -p "$HOME/Library/Caches/com.autodesk.AcCoreConsole"
+    touch "$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() { return 1; }
+safe_clean() {
+    local desc="${*: -1}"
+    echo "SAFE_CLEAN:$desc"
+    local arg
+    for arg in "${@:1:$#-1}"; do
+        echo "PATH:$arg"
+    done
+}
+safe_clean_guarded() { shift; safe_clean "$@"; }
+note_activity() { :; }
+clean_3d_tools
+INNER
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAFE_CLEAN:Autodesk cache"* ]] || return 1
+    [[ "$output" == *"PATH:"*"com.autodesk.AcCoreConsole"* ]] || return 1
+}
+
+@test "safe_remove refuses a live reverse-DNS user cache (#1390)" {
+    mkdir -p "$HOME/Library/Caches/com.autodesk.AcCoreConsole"
+    local db="$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db"
+    touch "$db"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=0 /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+# The owner probe reads one `ps` snapshot rather than forking pgrep per
+# candidate, so a live helper is simulated by the table it would appear in.
+ps() {
+    cat <<'TABLE'
+  PID  PPID COMM             ARGS
+  901     1 /Applications/Autodesk Fusion.app/Contents/MacOS/AcCoreConsole /Applications/Autodesk Fusion.app/Contents/MacOS/AcCoreConsole
+TABLE
+}
+oplog_enabled() { return 1; }
+log_operation() { :; }
+debug_log() { :; }
+db="$HOME/Library/Caches/com.autodesk.AcCoreConsole/Cache.db"
+set +e
+safe_remove "$db" true
+rc=$?
+set -e
+[[ $rc -ne 0 ]]
+[[ -f "$db" ]]
+INNER
+
+    [ "$status" -eq 0 ]
+    [[ -f "$db" ]]
+}
+
+@test "safe_remove deletes an idle reverse-DNS user cache" {
+    mkdir -p "$HOME/Library/Caches/com.example.idleapp"
+    local db="$HOME/Library/Caches/com.example.idleapp/Cache.db"
+    touch "$db"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=0 /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+pgrep() { return 1; }
+lsof() { return 1; }
+oplog_enabled() { return 1; }
+log_operation() { :; }
+debug_log() { :; }
+validate_path_for_deletion() { return 0; }
+db="$HOME/Library/Caches/com.example.idleapp/Cache.db"
+safe_remove "$db" true
+[[ ! -e "$db" ]]
+INNER
+
+    [ "$status" -eq 0 ]
+    [[ ! -e "$db" ]]
 }

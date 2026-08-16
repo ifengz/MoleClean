@@ -229,6 +229,67 @@ EOF
     [ "$result" = "protected" ]
 }
 
+@test "should_protect_path protects wallpaper and aerial assets" {
+    local path result
+    for path in \
+        "$HOME/Library/Application Support/com.apple.idleassetsd" \
+        "$HOME/Library/Application Support/com.apple.idleassetsd/Customer/video.mov" \
+        "/Library/Application Support/com.apple.idleassetsd/Customer/video.mov" \
+        "$HOME/Library/Application Support/com.apple.wallpaper/aerials/video.mov" \
+        "$HOME/Library/Application Support/com.apple.wallpaper/aerials/thumbnails/video.png"; do
+        result=$(HOME="$HOME" TARGET_PATH="$path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo protected || echo unprotected')
+        [ "$result" = "protected" ] || return 1
+    done
+
+    path="$HOME/Library/Containers/com.apple.wallpaper.agent/Data/Library/Caches/rebuildable.bin"
+    result=$(HOME="$HOME" TARGET_PATH="$path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo protected || echo unprotected')
+    [ "$result" = "unprotected" ]
+}
+
+@test "xcode_build_tooling_process_state recognizes command-line build owners" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+pgrep() {
+    [[ "$1" == "-x" && "$2" == "xcodebuild" ]]
+}
+xcode_build_tooling_process_state
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "xcode_build_tooling_process_state reports unknown on probe errors and missing pgrep" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+pgrep() { return 2; }
+process_state=0
+xcode_build_tooling_process_state || process_state=$?
+[[ "$process_state" -eq 2 ]] || exit 2
+unset -f pgrep
+PATH=/nonexistent
+process_state=0
+xcode_build_tooling_process_state || process_state=$?
+[[ "$process_state" -eq 2 ]] || exit 3
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "xcode_build_tooling_process_state reports reliable no-match" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+pgrep() { return 1; }
+process_state=0
+xcode_build_tooling_process_state || process_state=$?
+[[ "$process_state" -eq 1 ]]
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "rotate_log_once only checks log size once per session" {
     local log_file="$HOME/Library/Logs/mole/mole.log"
     mkdir -p "$(dirname "$log_file")"
@@ -343,7 +404,150 @@ EOF
     [ "${color_lines[0]}" = $'\033[0;31m1.00GB\033[0m' ]
     [ "${color_lines[1]}" = $'\033[0;33m5.0MB\033[0m' ]
     [ "${color_lines[2]}" = $'\033[0;32m180KB\033[0m' ]
-    [ "${color_lines[3]}" = $'\033[0;90m0B\033[0m' ]
+    [ "${color_lines[3]}" = $'\033[0;38;5;244m0B\033[0m' ]
+}
+
+@test "muted text avoids theme-defined ANSI bright black" {
+	run grep -R -I -nF '0;90m' \
+        "$PROJECT_ROOT/lib" \
+        "$PROJECT_ROOT/bin" \
+        "$PROJECT_ROOT/mole" \
+        "$PROJECT_ROOT/cmd/analyze"
+
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "mole_pgrep_any distinguishes active, inactive, and unknown probes" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+pgrep() {
+    case "$2" in
+        active) return 0 ;;
+        missing) return 1 ;;
+        broken) return 2 ;;
+    esac
+    return 1
+}
+
+mole_pgrep_any -x missing -f active
+set +e
+mole_pgrep_any -x missing -f absent
+inactive_rc=$?
+mole_pgrep_any -x missing -f broken
+unknown_rc=$?
+set -e
+printf 'inactive=%s unknown=%s\n' "$inactive_rc" "$unknown_rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"inactive=1 unknown=2"* ]]
+}
+
+@test "mole_darwin_user_cache_root validates trusted getconf output" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+resolver_mode=valid
+run_with_timeout() {
+    [[ "$2" == "/usr/bin/getconf" && "$3" == "DARWIN_USER_CACHE_DIR" ]] || return 3
+    case "$resolver_mode" in
+        valid) printf '/var/folders/example/C/\n' ;;
+        relative) printf 'tmp/cache\n' ;;
+        traversal) printf '/var/folders/../private\n' ;;
+        root) printf '/\n' ;;
+        timeout) return 124 ;;
+    esac
+}
+
+valid=$(mole_darwin_user_cache_root)
+relative_rc=0
+traversal_rc=0
+root_rc=0
+timeout_rc=0
+resolver_mode=relative
+mole_darwin_user_cache_root > /dev/null 2>&1 || relative_rc=$?
+resolver_mode=traversal
+mole_darwin_user_cache_root > /dev/null 2>&1 || traversal_rc=$?
+resolver_mode=root
+mole_darwin_user_cache_root > /dev/null 2>&1 || root_rc=$?
+resolver_mode=timeout
+mole_darwin_user_cache_root > /dev/null 2>&1 || timeout_rc=$?
+printf 'valid=%s relative=%s traversal=%s root=%s timeout=%s\n' \
+    "$valid" "$relative_rc" "$traversal_rc" "$root_rc" "$timeout_rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"valid=/var/folders/example/C relative=1 traversal=1 root=1 timeout=124"* ]]
+}
+
+@test "mole_go_cache_root validates owner output and propagates timeout" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+go() { :; }
+resolver_mode=valid
+run_with_timeout() {
+    [[ "$2" == "go" && "$3" == "env" ]] || return 3
+    case "$resolver_mode:$4" in
+        valid:GOCACHE) printf '%s/custom-go-build/\n' "$HOME" ;;
+        valid:GOMODCACHE) printf '%s/custom-go-mod/\n' "$HOME" ;;
+        relative:*) printf 'tmp/go-cache\n' ;;
+        traversal:*) printf '%s/cache/../private\n' "$HOME" ;;
+        broad:*) printf '%s/go\n' "$HOME" ;;
+        timeout:*) return 124 ;;
+    esac
+}
+
+build=$(mole_go_cache_root GOCACHE)
+module=$(mole_go_cache_root GOMODCACHE)
+relative_rc=0
+traversal_rc=0
+broad_rc=0
+timeout_rc=0
+resolver_mode=relative
+mole_go_cache_root GOCACHE > /dev/null 2>&1 || relative_rc=$?
+resolver_mode=traversal
+mole_go_cache_root GOCACHE > /dev/null 2>&1 || traversal_rc=$?
+resolver_mode=broad
+mole_go_cache_root GOMODCACHE > /dev/null 2>&1 || broad_rc=$?
+resolver_mode=timeout
+mole_go_cache_root GOCACHE > /dev/null 2>&1 || timeout_rc=$?
+printf 'build=%s module=%s relative=%s traversal=%s broad=%s timeout=%s\n' \
+    "$build" "$module" "$relative_rc" "$traversal_rc" "$broad_rc" "$timeout_rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"build=$HOME/custom-go-build module=$HOME/custom-go-mod relative=1 traversal=1 broad=1 timeout=124"* ]]
+}
+
+@test "mole_deno_cache_root accepts narrow absolute roots and rejects unsafe ones" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+default=$(mole_deno_cache_root)
+DENO_DIR="$HOME/custom-deno/"
+custom=$(mole_deno_cache_root)
+relative_rc=0
+traversal_rc=0
+broad_rc=0
+DENO_DIR="tmp/deno"
+mole_deno_cache_root > /dev/null 2>&1 || relative_rc=$?
+DENO_DIR="$HOME/cache/../deno"
+mole_deno_cache_root > /dev/null 2>&1 || traversal_rc=$?
+DENO_DIR="$HOME/Library/Caches"
+mole_deno_cache_root > /dev/null 2>&1 || broad_rc=$?
+printf 'default=%s custom=%s relative=%s traversal=%s broad=%s\n' \
+    "$default" "$custom" "$relative_rc" "$traversal_rc" "$broad_rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"default=$HOME/Library/Caches/deno custom=$HOME/custom-deno relative=1 traversal=1 broad=1"* ]]
 }
 
 @test "create_temp_file and create_temp_dir are tracked and cleaned" {

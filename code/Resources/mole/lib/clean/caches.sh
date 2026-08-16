@@ -41,14 +41,16 @@ check_tcc_permissions() {
     ensure_user_file "$permission_flag"
     return 0
 }
-# Args: $1=browser_name, $2=cache_path
+# Args: $1=browser_name, $2=cache_path, $3=optional post-size guard callback
 # Clean Service Worker cache while protecting critical web editors.
 clean_service_worker_cache() {
     local browser_name="$1"
     local cache_path="$2"
+    local delete_guard="${3:-}"
     [[ ! -d "$cache_path" ]] && return 0
     local cleaned_size=0
     local protected_count=0
+    local guard_stopped=false
     # shellcheck disable=SC2016
     while IFS= read -r cache_dir; do
         [[ ! -d "$cache_dir" ]] && continue
@@ -77,11 +79,16 @@ clean_service_worker_cache() {
             protected_count=$((protected_count + 1))
         fi
         if [[ "$is_protected" == "false" ]]; then
-            if [[ "$DRY_RUN" == "true" ]] && declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
-                record_dry_run_cleanup_target "$cache_dir" "$size" 1 true || continue
+            if [[ -n "$delete_guard" ]] && ! "$delete_guard"; then
+                guard_stopped=true
+                break
             fi
-            if [[ "$DRY_RUN" != "true" ]]; then
-                safe_remove "$cache_dir" true || true
+            if [[ "$DRY_RUN" == "true" ]]; then
+                if declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
+                    record_dry_run_cleanup_target "$cache_dir" "$size" 1 true || continue
+                fi
+            elif ! safe_remove "$cache_dir" true "$size"; then
+                continue
             fi
             cleaned_size=$((cleaned_size + size))
         fi
@@ -113,6 +120,8 @@ clean_service_worker_cache() {
             MOLE_SPINNER_PREFIX="  " start_inline_spinner "Scanning browser Service Worker caches..."
         fi
     fi
+    [[ "$guard_stopped" == "true" ]] && return 75
+    return 0
 }
 # Check whether a directory looks like a project container.
 project_cache_has_indicators() {
@@ -305,7 +314,11 @@ clean_project_cache_target() {
     local -a target_paths=("${@:1:$#-1}")
 
     if declare -f safe_clean > /dev/null 2>&1; then
-        safe_clean "${target_paths[@]}" "$description" || true
+        local clean_rc=0
+        safe_clean "${target_paths[@]}" "$description" || clean_rc=$?
+        if [[ $clean_rc -eq 124 || $clean_rc -ge 128 ]]; then
+            return "$clean_rc"
+        fi
         return 0
     fi
 
@@ -316,7 +329,11 @@ clean_project_cache_target() {
     local target_path=""
     for target_path in "${target_paths[@]}"; do
         [[ -e "$target_path" ]] || continue
-        safe_remove "$target_path" true || true
+        local remove_rc=0
+        safe_remove "$target_path" true || remove_rc=$?
+        if [[ $remove_rc -eq 124 || $remove_rc -ge 128 ]]; then
+            return "$remove_rc"
+        fi
     done
 }
 
@@ -346,28 +363,30 @@ process_project_cache_matches() {
         [[ -n "$record_root" && -n "$cache_dir" ]] || continue
         case "${cache_dir##*/}" in
             ".next")
-                flush_python_group_if_needed "$current_python_root" current_python_dirs
+                flush_python_group_if_needed "$current_python_root" current_python_dirs || return $?
                 current_python_root=""
                 current_python_dirs=()
-                [[ -d "$cache_dir/cache" ]] && clean_project_cache_target "$cache_dir/cache"/* "Next.js build cache" || true
+                if [[ -d "$cache_dir/cache" ]]; then
+                    clean_project_cache_target "$cache_dir/cache"/* "Next.js build cache" || return $?
+                fi
                 ;;
             "__pycache__")
                 if [[ "$record_root" != "$current_python_root" && ${#current_python_dirs[@]} -gt 0 ]]; then
-                    flush_python_group_if_needed "$current_python_root" current_python_dirs
+                    flush_python_group_if_needed "$current_python_root" current_python_dirs || return $?
                     current_python_dirs=()
                 fi
                 current_python_root="$record_root"
                 [[ -d "$cache_dir" ]] && current_python_dirs+=("$cache_dir")
                 ;;
             ".dart_tool")
-                flush_python_group_if_needed "$current_python_root" current_python_dirs
+                flush_python_group_if_needed "$current_python_root" current_python_dirs || return $?
                 current_python_root=""
                 current_python_dirs=()
                 if [[ -d "$cache_dir" ]]; then
-                    clean_project_cache_target "$cache_dir" "Flutter build cache (.dart_tool)" || true
+                    clean_project_cache_target "$cache_dir" "Flutter build cache (.dart_tool)" || return $?
                     local build_dir="$(dirname "$cache_dir")/build"
                     if [[ -d "$build_dir" ]]; then
-                        clean_project_cache_target "$build_dir" "Flutter build cache (build/)" || true
+                        clean_project_cache_target "$build_dir" "Flutter build cache (build/)" || return $?
                     fi
                 fi
                 ;;
@@ -410,8 +429,11 @@ clean_python_bytecode_cache_group() {
             continue
         fi
 
-        local size_kb
-        size_kb=$(get_path_size_kb "$cache_dir")
+        local size_kb=""
+        local size_rc=0
+        size_kb=$(get_path_size_kb "$cache_dir") || size_rc=$?
+        [[ $size_rc -eq 0 ]] || _mole_record_clean_cancellation "$size_rc"
+        [[ $size_rc -eq 0 ]] || return "$size_rc"
         [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
 
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -501,8 +523,10 @@ clean_project_caches() {
             stop_inline_spinner
         fi
 
-        process_project_cache_matches "$root_matches_file"
+        local process_rc=0
+        process_project_cache_matches "$root_matches_file" || process_rc=$?
         rm -f "$root_matches_file"
+        [[ $process_rc -eq 0 ]] || return "$process_rc"
 
         if [[ -t 1 ]]; then
             MOLE_SPINNER_PREFIX="  "

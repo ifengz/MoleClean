@@ -21,6 +21,7 @@ source "$SCRIPT_DIR/../lib/core/common.sh"
 trap cleanup_temp_files EXIT INT TERM
 source "$SCRIPT_DIR/../lib/ui/menu_paginated.sh"
 source "$SCRIPT_DIR/../lib/ui/app_selector.sh"
+source "$SCRIPT_DIR/../lib/uninstall/steam.sh"
 source "$SCRIPT_DIR/../lib/uninstall/batch.sh"
 
 # State
@@ -32,7 +33,7 @@ files_cleaned=0
 total_size_cleaned=0
 
 readonly MOLE_UNINSTALL_META_CACHE_DIR="$HOME/.cache/mole"
-readonly MOLE_UNINSTALL_META_CACHE_FILE="$MOLE_UNINSTALL_META_CACHE_DIR/uninstall_app_metadata_v1"
+readonly MOLE_UNINSTALL_META_CACHE_FILE="$MOLE_UNINSTALL_META_CACHE_DIR/uninstall_app_metadata_v2"
 readonly MOLE_UNINSTALL_META_CACHE_LOCK="${MOLE_UNINSTALL_META_CACHE_FILE}.lock"
 readonly MOLE_UNINSTALL_META_REFRESH_TTL=604800 # 7 days
 readonly MOLE_UNINSTALL_EPOCH_FLOOR=978307200
@@ -48,6 +49,13 @@ readonly MOLE_UNINSTALL_INLINE_DU_MAX_COLD_ROWS="${MOLE_UNINSTALL_INLINE_DU_MAX_
 
 uninstall_normalize_size_display() {
     local size="${1:-}"
+    local app_path="${2:-}"
+
+    if [[ -n "$app_path" ]] && uninstall_app_is_steam_launcher "$app_path"; then
+        echo "N/A (Steam-managed)"
+        return 0
+    fi
+
     if [[ -z "$size" || "$size" == "0" || "$size" == "Unknown" ]]; then
         echo "N/A"
         return 0
@@ -73,18 +81,18 @@ uninstall_quick_app_size_kb() {
         return 0
     }
 
-    local logical_size
-    logical_size=$(run_with_timeout "$MOLE_UNINSTALL_INLINE_MDLS_SIZE_TIMEOUT_SEC" mdls -name kMDItemLogicalSize -raw "$app_path" 2> /dev/null || echo "")
-    if [[ "$logical_size" =~ ^[0-9]+$ && "$logical_size" -gt 0 ]]; then
-        echo $(((logical_size + 1023) / 1024))
+    local physical_size
+    physical_size=$(run_with_timeout "$MOLE_UNINSTALL_INLINE_MDLS_SIZE_TIMEOUT_SEC" mdls -name kMDItemPhysicalSize -raw "$app_path" 2> /dev/null || echo "")
+    if [[ "$physical_size" =~ ^[0-9]+$ && "$physical_size" -gt 0 ]]; then
+        echo $(((physical_size + 1023) / 1024))
         return 0
     fi
 
     echo "0"
 }
 
-# du can underreport APFS-cloned bundles relative to Finder, so this only
-# stands in until the deferred refresh recomputes the logical size.
+# This bounded physical-size fallback stands in until the deferred refresh
+# can query Spotlight metadata.
 uninstall_inline_du_size_kb() {
     local app_path="$1"
     [[ -n "$app_path" && -d "$app_path" ]] || {
@@ -93,7 +101,7 @@ uninstall_inline_du_size_kb() {
     }
 
     local du_size_kb
-    du_size_kb=$(run_with_timeout "$MOLE_UNINSTALL_INLINE_DU_SIZE_TIMEOUT_SEC" du -sk "$app_path" 2> /dev/null | awk '{print $1; exit}') || du_size_kb=""
+    du_size_kb=$(run_with_timeout "$MOLE_UNINSTALL_INLINE_DU_SIZE_TIMEOUT_SEC" du -skP "$app_path" 2> /dev/null | awk '{print $1; exit}') || du_size_kb=""
     if [[ "$du_size_kb" =~ ^[0-9]+$ && "$du_size_kb" -gt 0 ]]; then
         echo "$du_size_kb"
         return 0
@@ -522,13 +530,14 @@ uninstall_print_app_paths_with_mtime() {
 }
 
 uninstall_app_inventory_fingerprint() {
-    local app_dir app_path app_mtime pkg_app_path
+    local app_dir app_path app_mtime info_mtime pkg_app_path
 
     {
         while IFS= read -r pkg_app_path; do
             [[ -n "$pkg_app_path" && -d "$pkg_app_path" ]] || continue
             app_mtime=$(get_file_mtime "$pkg_app_path")
-            printf '%s|%s\n' "$pkg_app_path" "${app_mtime:-0}"
+            info_mtime=$(get_file_mtime "$pkg_app_path/Contents/Info.plist")
+            printf '%s|%s|%s\n' "$pkg_app_path" "${app_mtime:-0}" "${info_mtime:-0}"
         done < <(pkg_receipt_nonstandard_app_paths)
 
         while IFS= read -r app_dir; do
@@ -536,10 +545,40 @@ uninstall_app_inventory_fingerprint() {
             while IFS=$'\t' read -r app_mtime app_path; do
                 [[ -n "$app_path" ]] || continue
                 uninstall_should_skip_app_path "$app_path" && continue
-                printf '%s|%s\n' "$app_path" "${app_mtime:-0}"
+                info_mtime=$(get_file_mtime "$app_path/Contents/Info.plist")
+                printf '%s|%s|%s\n' "$app_path" "${app_mtime:-0}" "${info_mtime:-0}"
             done < <(uninstall_print_app_paths_with_mtime "$app_dir")
         done < <(uninstall_print_app_search_dirs)
-    } | sort -u
+    } | LC_ALL=C sort -u
+}
+
+# The in-session app index remains valid when the live inventory only loses
+# rows. load_applications rechecks path existence before displaying each row.
+# New rows and changed mtimes must rebuild the index so protection and bundle
+# metadata are evaluated again.
+uninstall_inventory_can_reuse_cached_apps() {
+    local cached_inventory="$1"
+    local current_inventory="$2"
+    local additions=""
+    local removals=""
+
+    [[ -n "$cached_inventory" && -n "$current_inventory" ]] || return 1
+    additions=$(LC_ALL=C comm -13 \
+        <(printf '%s\n' "$cached_inventory") \
+        <(printf '%s\n' "$current_inventory")) || return 1
+    [[ -z "$additions" ]] || return 1
+
+    removals=$(LC_ALL=C comm -23 \
+        <(printf '%s\n' "$cached_inventory") \
+        <(printf '%s\n' "$current_inventory")) || return 1
+    local removed_row removed_path
+    while IFS= read -r removed_row; do
+        [[ -n "$removed_row" ]] || continue
+        removed_path="${removed_row%|*}"
+        removed_path="${removed_path%|*}"
+        [[ ! -e "$removed_path" ]] || return 1
+    done <<< "$removals"
+    return 0
 }
 
 # Internal helpers for scan_applications. They read and write locals
@@ -1200,6 +1239,16 @@ stop_uninstall_interactive_screen() {
     unset MOLE_ALT_SCREEN_ACTIVE MOLE_MANAGED_ALT_SCREEN
 }
 
+# Surface an abort during scan/load/selection instead of returning to the
+# prompt as if the run had succeeded. Interactive mode renders on an alternate
+# screen, so the reason has to be printed after the screen is restored (#1339).
+uninstall_abort() {
+    local reason="$1"
+    stop_uninstall_interactive_screen
+    show_cursor
+    log_error "Uninstall aborted: $reason"
+}
+
 # Cleanup: restore cursor and kill keepalive.
 cleanup() {
     local exit_code="${1:-$?}"
@@ -1224,6 +1273,52 @@ match_apps_by_name() {
     local -a search_terms=("$@")
     selected_apps=()
     local -a matched_indices=()
+
+    # `mo uninstall Tor Browser` arrives as two words. Matching each word
+    # alone sent "Tor" into a substring hit on WebSTORm while the app the
+    # user actually named sat in the list (#1365). When the words joined
+    # with spaces exactly match an installed app's display or directory
+    # name, that is the query, UNLESS every word already exactly names its
+    # own installed app: with Foo.app, Bar.app, and "Foo Bar.app" all
+    # present, `mo uninstall Foo Bar` keeps its original two-app meaning
+    # rather than silently collapsing into the third.
+    if [[ ${#search_terms[@]} -gt 1 ]]; then
+        local every_word_exact=true
+        local word word_lower word_app word_hit
+        for word in "${search_terms[@]}"; do
+            word_lower=$(echo "$word" | tr '[:upper:]' '[:lower:]')
+            word_hit=false
+            for word_app in "${apps_data[@]}"; do
+                IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$word_app"
+                local word_name_lower word_dir_lower
+                word_name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
+                word_dir_lower=$(basename "$app_path" .app | tr '[:upper:]' '[:lower:]')
+                if [[ "$word_name_lower" == "$word_lower" || "$word_dir_lower" == "$word_lower" ]]; then
+                    word_hit=true
+                    break
+                fi
+            done
+            if [[ "$word_hit" == "false" ]]; then
+                every_word_exact=false
+                break
+            fi
+        done
+        if [[ "$every_word_exact" == "false" ]]; then
+            local joined_lower
+            joined_lower=$(echo "$*" | tr '[:upper:]' '[:lower:]')
+            local joined_app
+            for joined_app in "${apps_data[@]}"; do
+                IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$joined_app"
+                local joined_name_lower joined_dir_lower
+                joined_name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
+                joined_dir_lower=$(basename "$app_path" .app | tr '[:upper:]' '[:lower:]')
+                if [[ "$joined_name_lower" == "$joined_lower" || "$joined_dir_lower" == "$joined_lower" ]]; then
+                    selected_apps=("$joined_app")
+                    return 0
+                fi
+            done
+        fi
+    fi
 
     for search_term in "${search_terms[@]}"; do
         local search_lower
@@ -1319,13 +1414,16 @@ uninstall_list_json_escape() {
 uninstall_list_apps() {
     local apps_file=""
     if ! apps_file=$(scan_applications); then
+        uninstall_abort "could not complete the application scan"
         return 1
     fi
     if [[ ! -f "$apps_file" ]]; then
+        uninstall_abort "application scan produced no list"
         return 1
     fi
     if ! load_applications "$apps_file"; then
         rm -f "$apps_file"
+        uninstall_abort "no applications available for uninstallation"
         return 1
     fi
     rm -f "$apps_file"
@@ -1350,7 +1448,7 @@ uninstall_list_apps() {
             local source_label="App"
             [[ -n "$cask" ]] && source_label="Homebrew"
             local size_display
-            size_display=$(uninstall_normalize_size_display "$size")
+            size_display=$(uninstall_normalize_size_display "$size" "$app_path")
             if [[ $first -eq 1 ]]; then
                 first=0
                 printf '\n'
@@ -1392,7 +1490,7 @@ uninstall_list_apps() {
         fi
         local uninstall_name="${cask:-$app_name}"
         local size_display
-        size_display=$(uninstall_normalize_size_display "$size")
+        size_display=$(uninstall_normalize_size_display "$size" "$app_path")
 
         # Truncate by display columns, then adjust printf width for CJK.
         # printf counts bytes (LC_ALL=C), but CJK chars are 3 bytes yet only
@@ -1489,16 +1587,16 @@ main() {
     if [[ ${#app_name_args[@]} -gt 0 ]]; then
         local apps_file=""
         if ! apps_file=$(scan_applications); then
-            show_cursor
+            uninstall_abort "could not complete the application scan"
             return 1
         fi
         if [[ ! -f "$apps_file" ]]; then
-            show_cursor
+            uninstall_abort "application scan produced no list"
             return 1
         fi
         if ! load_applications "$apps_file"; then
             rm -f "$apps_file"
-            show_cursor
+            uninstall_abort "no applications available for uninstallation"
             return 1
         fi
 
@@ -1519,7 +1617,7 @@ main() {
         for selected_app in "${selected_apps[@]}"; do
             IFS='|' read -r _ app_path app_name _ size last_used _ <<< "$selected_app"
             local size_display
-            size_display=$(uninstall_normalize_size_display "$size")
+            size_display=$(uninstall_normalize_size_display "$size" "$app_path")
             local last_display
             last_display=$(uninstall_normalize_last_used_display "$last_used")
             printf "%d. %s  %s  |  Last: %s\n" "$index" "$app_name" "$size_display" "$last_display"
@@ -1562,9 +1660,10 @@ main() {
         if [[ -n "$cached_apps_file" && -f "$cached_apps_file" && -n "$cached_inventory_fingerprint" ]]; then
             local current_inventory_fingerprint
             current_inventory_fingerprint=$(uninstall_app_inventory_fingerprint 2> /dev/null || echo "")
-            if [[ -n "$current_inventory_fingerprint" && "$current_inventory_fingerprint" == "$cached_inventory_fingerprint" ]]; then
+            if uninstall_inventory_can_reuse_cached_apps "$cached_inventory_fingerprint" "$current_inventory_fingerprint"; then
                 apps_file="$cached_apps_file"
                 reused_app_cache=true
+                cached_inventory_fingerprint="$current_inventory_fingerprint"
             fi
         fi
 
@@ -1573,7 +1672,16 @@ main() {
                 rm -f "$cached_apps_file" 2> /dev/null || true
             fi
 
+            local scan_abort_reason=""
             if ! apps_file=$(scan_applications); then
+                scan_abort_reason="could not complete the application scan"
+            elif [[ ! -f "$apps_file" ]]; then
+                scan_abort_reason="application scan produced no list"
+            fi
+            if [[ -n "$scan_abort_reason" ]]; then
+                uninstall_abort "$scan_abort_reason"
+                rm -f "$apps_file"
+                [[ "$apps_file" == "$cached_apps_file" ]] && cached_apps_file=""
                 return 1
             fi
 
@@ -1581,13 +1689,10 @@ main() {
             cached_inventory_fingerprint=$(uninstall_app_inventory_fingerprint 2> /dev/null || echo "")
         fi
 
-        if [[ ! -f "$apps_file" ]]; then
-            return 1
-        fi
-
         if ! load_applications "$apps_file"; then
             rm -f "$apps_file"
             [[ "$apps_file" == "$cached_apps_file" ]] && cached_apps_file=""
+            uninstall_abort "no applications available for uninstallation"
             return 1
         fi
 
@@ -1602,12 +1707,18 @@ main() {
         set -e
 
         if [[ $exit_code -ne 0 ]]; then
-            stop_uninstall_interactive_screen
-            show_cursor
             rm -f "$apps_file"
             [[ "$apps_file" == "$cached_apps_file" ]] && cached_apps_file=""
-
-            return 0
+            if [[ "${_MOLE_MENU_USER_QUIT:-0}" == "1" ]]; then
+                # A deliberate q is a cancel, not a failure: leave quietly
+                # with success, matching mole's other cancel flows. Only a
+                # selector that broke gets the visible abort below.
+                stop_uninstall_interactive_screen
+                show_cursor
+                return 0
+            fi
+            uninstall_abort "application selection did not complete"
+            return 1
         fi
 
         stop_uninstall_interactive_screen
@@ -1625,11 +1736,11 @@ main() {
         local max_size_width=0
         local max_last_width=0
         for selected_app in "${selected_apps[@]}"; do
-            IFS='|' read -r _ _ app_name _ size last_used _ <<< "$selected_app"
+            IFS='|' read -r _ app_path app_name _ size last_used _ <<< "$selected_app"
             local name_width=$(get_display_width "$app_name")
             [[ $name_width -gt $max_name_display_width ]] && max_name_display_width=$name_width
             local size_display
-            size_display=$(uninstall_normalize_size_display "$size")
+            size_display=$(uninstall_normalize_size_display "$size" "$app_path")
             [[ ${#size_display} -gt $max_size_width ]] && max_size_width=${#size_display}
             local last_display
             last_display=$(uninstall_normalize_last_used_display "$last_used")
@@ -1669,7 +1780,7 @@ main() {
             [[ $current_width -gt $max_name_display_width ]] && max_name_display_width=$current_width
 
             local size_display
-            size_display=$(uninstall_normalize_size_display "$size")
+            size_display=$(uninstall_normalize_size_display "$size" "$app_path")
 
             local last_display
             last_display=$(uninstall_normalize_last_used_display "$last_used")
@@ -1737,4 +1848,7 @@ main() {
     done
 }
 
-main "$@"
+# Run only when executed; sourcing loads definitions for tests. Kept on one
+# line because test harnesses slice this file with sed/awk anchored on the
+# `main "$@"` sentinel, and a multi-line guard leaves them an unclosed `if`.
+[[ "${BASH_SOURCE[0]}" != "$0" ]] || main "$@"
