@@ -49,18 +49,12 @@ _optimize_catalog_register sqlite_vacuum opt_sqlite_vacuum \
 _optimize_catalog_register launch_services_rebuild opt_launch_services_rebuild \
     "LaunchServices Repair" "LaunchServices Repair" \
     'Repair "Open with" menu & file associations' true
-_optimize_catalog_register dock_refresh opt_dock_refresh \
-    "Dock Refresh" "Dock Refresh" \
-    "Fix broken icons and visual glitches in the Dock" true
 _optimize_catalog_register prevent_network_dsstore opt_prevent_network_dsstore \
     "Prevent Finder .DS_Store" "Prevent Finder .DS_Store" \
     "Set a persistent Finder preference to stop writing .DS_Store on SMB/AFP/NFS and USB volumes" true
 _optimize_catalog_register legacy_overrides_audit opt_legacy_overrides_audit \
     "Legacy Overrides" "Legacy Overrides" \
     "Remove hidden App Nap and disk-image verification overrides left by old tweak tools" true
-_optimize_catalog_register memory_pressure_relief opt_memory_pressure_relief \
-    "Memory Optimization" "Memory Optimization" \
-    "Release inactive memory to improve system responsiveness" true
 _optimize_catalog_register network_stack_optimize opt_network_stack_optimize \
     "Network Stack Refresh" "Network Stack Refresh" \
     "Flush routing table and ARP cache to resolve network issues" true
@@ -98,16 +92,28 @@ _optimize_catalog_register coreduet_cleanup opt_coreduet_cleanup \
     "Usage Data" "Usage Data" \
     "Clean old usage tracking data" true
 
-optimize_catalog_handler_for() {
+optimize_catalog_index_for() {
     local requested_action="$1"
     local index
     for ((index = 0; index < ${#MOLE_OPTIMIZE_ACTIONS[@]}; index++)); do
         if [[ "${MOLE_OPTIMIZE_ACTIONS[$index]}" == "$requested_action" ]]; then
-            printf '%s\n' "${MOLE_OPTIMIZE_HANDLERS[$index]}"
+            printf '%s\n' "$index"
             return 0
         fi
     done
     return 1
+}
+
+optimize_catalog_handler_for() {
+    local index
+    index=$(optimize_catalog_index_for "$1") || return 1
+    printf '%s\n' "${MOLE_OPTIMIZE_HANDLERS[$index]}"
+}
+
+optimize_catalog_health_name_for() {
+    local index
+    index=$(optimize_catalog_index_for "$1") || return 1
+    printf '%s\n' "${MOLE_OPTIMIZE_HEALTH_NAMES[$index]}"
 }
 
 optimize_catalog_validate() {

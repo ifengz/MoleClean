@@ -564,7 +564,7 @@ func TestRenderBatteryCardShowsAdapterInputOnly(t *testing.T) {
 	}}, ThermalStatus{
 		BatteryTemp:  30.7,
 		AdapterPower: 94,
-	})
+	}, true)
 
 	var joined []string
 	for _, line := range card.lines {
@@ -773,13 +773,28 @@ func TestRenderDiskCardAddsMetaLineForSingleDisk(t *testing.T) {
 		Fstype:      "apfs",
 	}}, DiskIOStatus{ReadRate: 0, WriteRate: 0.1}, 0, false)
 
-	if len(card.lines) != 4 {
-		t.Fatalf("renderDiskCard() single disk expected 4 lines, got %d", len(card.lines))
+	if len(card.lines) != 3 {
+		t.Fatalf("renderDiskCard() single disk expected 3 lines, got %d", len(card.lines))
 	}
 
 	meta := stripANSI(card.lines[1])
 	if meta != "Total  926G · APFS" {
 		t.Fatalf("renderDiskCard() single disk meta line = %q, want %q", meta, "Total  926G · APFS")
+	}
+}
+
+func TestRenderDiskCardMetaLineShowsPurgeable(t *testing.T) {
+	card := renderDiskCard([]DiskStatus{{
+		UsedPercent: 64.9,
+		Used:        1226 << 30,
+		Total:       926 << 30,
+		Fstype:      "apfs",
+		Purgeable:   141 << 30,
+	}}, DiskIOStatus{}, 0, false)
+
+	meta := stripANSI(card.lines[1])
+	if meta != "Total  926G · APFS · 141G purgeable" {
+		t.Fatalf("renderDiskCard() meta line = %q, want %q", meta, "Total  926G · APFS · 141G purgeable")
 	}
 }
 
@@ -789,8 +804,8 @@ func TestRenderDiskCardDoesNotAddMetaLineForMultipleDisks(t *testing.T) {
 		{UsedPercent: 50.0, Used: 500 << 30, Total: 1000 << 30, Fstype: "apfs"},
 	}, DiskIOStatus{}, 0, false)
 
-	if len(card.lines) != 4 {
-		t.Fatalf("renderDiskCard() multiple disks expected 4 lines, got %d", len(card.lines))
+	if len(card.lines) != 3 {
+		t.Fatalf("renderDiskCard() multiple disks expected 3 lines, got %d", len(card.lines))
 	}
 
 	for _, line := range card.lines {
@@ -842,31 +857,45 @@ func TestRenderDiskCardUsesGraphicIOLine(t *testing.T) {
 		{UsedPercent: 95.0, Used: 16 << 30, Total: 16<<30 + 444<<20, External: true},
 	}, DiskIOStatus{ReadRate: 0, WriteRate: 24.6}, 101<<20, false)
 
-	if len(card.lines) != 5 {
-		t.Fatalf("renderDiskCard() expected 5 lines without trash, got %d", len(card.lines))
+	if len(card.lines) != 4 {
+		t.Fatalf("renderDiskCard() expected 4 lines without trash, got %d", len(card.lines))
 	}
-	if got := stripANSI(card.lines[4]); got != "I/O    ▯▯▯▯▯ R 0 · ▮▮▯▯▯ W 25 MB/s" {
+	if got := stripANSI(card.lines[3]); got != "I/O    ▯▯▯▯▯ R 0 · ▮▮▯▯▯ W 25 MB/s" {
 		t.Fatalf("I/O line = %q", got)
 	}
 }
 
-func TestRenderDiskCardFormatsSingleAndMultipleSMARTSummaries(t *testing.T) {
-	single := renderDiskCard([]DiskStatus{{
-		UsedPercent: 30,
-		Used:        30 << 30,
-		Total:       100 << 30,
-		SmartStatus: smartStatusVerified,
-	}}, DiskIOStatus{}, 0, false)
-	if got := stripANSI(single.lines[2]); got != "SMART  Verified" {
-		t.Fatalf("single SMART line = %q", got)
-	}
-
-	multiple := renderDiskCard([]DiskStatus{
+// SMART earns a row only when a disk is failing. "Verified" needs no action,
+// and USB enclosures rarely pass SMART through, so healthy machines used to
+// carry a row that said nothing and grew with every disk attached.
+func TestRenderDiskCardShowsSMARTOnlyWhenFailing(t *testing.T) {
+	healthy := renderDiskCard([]DiskStatus{
 		{UsedPercent: 30, Used: 30 << 30, Total: 100 << 30, SmartStatus: smartStatusVerified},
 		{UsedPercent: 20, Used: 20 << 30, Total: 100 << 30, External: true, SmartStatus: smartStatusUnsupported},
 	}, DiskIOStatus{}, 0, false)
-	if got := stripANSI(multiple.lines[2]); got != "SMART  INTR OK · EXTR N/A" {
-		t.Fatalf("multiple SMART line = %q", got)
+	for _, line := range healthy.lines {
+		if strings.Contains(stripANSI(line), "SMART") {
+			t.Fatalf("healthy disks should not render a SMART row, got %q", stripANSI(line))
+		}
+	}
+
+	failing := renderDiskCard([]DiskStatus{{
+		UsedPercent: 30,
+		Used:        30 << 30,
+		Total:       100 << 30,
+		SmartStatus: smartStatusFailing,
+	}}, DiskIOStatus{}, 0, false)
+	var smartLine string
+	for _, line := range failing.lines {
+		if strings.Contains(stripANSI(line), "SMART") {
+			smartLine = stripANSI(line)
+		}
+	}
+	if smartLine == "" {
+		t.Fatal("a failing disk must still render a SMART row")
+	}
+	if !strings.Contains(smartLine, "Failing") || !strings.Contains(smartLine, "Back up now") {
+		t.Fatalf("failing SMART row must name the state and the action, got %q", smartLine)
 	}
 }
 
@@ -883,7 +912,7 @@ func TestRenderDiskCardHighlightsFailingSMARTAndFitsNarrowWidth(t *testing.T) {
 	}
 
 	const narrowWidth = 38
-	rendered := renderCard(card, narrowWidth, 0)
+	rendered := renderCard(card, narrowWidth)
 	for line := range strings.Lines(rendered) {
 		if lipgloss.Width(stripANSI(line)) > narrowWidth {
 			t.Fatalf("narrow disk card line exceeds %d columns: %q", narrowWidth, line)
@@ -1322,7 +1351,7 @@ func TestRenderCardWrapsOnNarrowWidth(t *testing.T) {
 		},
 	}
 
-	rendered := renderCard(card, 26, 0)
+	rendered := renderCard(card, 26)
 	for line := range strings.Lines(rendered) {
 		if lipgloss.Width(stripANSI(line)) > 26 {
 			t.Fatalf("renderCard() line exceeds width: %q", line)
@@ -1430,6 +1459,94 @@ func TestViewShrinksCPUCardToFitHeight(t *testing.T) {
 	}
 	if strings.Count(stripANSI(short.View()), "Core") > 8 {
 		t.Error("short window should have stepped the core count down")
+	}
+}
+
+func TestLayoutColumnRowsStacksBesideTallCard(t *testing.T) {
+	tall := cardData{icon: iconCPU, title: "CPU", lines: make([]string, 12)}
+	short := func(title string) cardData {
+		return cardData{title: title, lines: []string{"x"}}
+	}
+	cards := []cardData{tall, short("GPU"), short("Memory"), short("Disk")}
+
+	rows := layoutColumnRows(cards, colWidth)
+
+	if len(rows) == 0 || len(rows[0].left) != 1 || rows[0].left[0].title != "CPU" {
+		t.Fatalf("first row should seed its left cell with CPU, got %+v", rows)
+	}
+	// Several short cards stack beside the tall CPU to fill its height and keep
+	// the following rows' titles aligned.
+	if len(rows[0].right) < 2 {
+		t.Errorf("tall CPU should be matched by >=2 stacked cards, got %d", len(rows[0].right))
+	}
+	// Every card is placed exactly once.
+	total := 0
+	for _, r := range rows {
+		total += len(r.left) + len(r.right)
+	}
+	if total != len(cards) {
+		t.Errorf("placed %d cards, want %d", total, len(cards))
+	}
+}
+
+func TestRenderTwoColumnsAlignsRowTitles(t *testing.T) {
+	mk := func(icon, title string, n int) cardData {
+		lines := make([]string, n)
+		for i := range lines {
+			lines[i] = title
+		}
+		return cardData{icon: icon, title: title, lines: lines}
+	}
+	// A tall CPU beside short cards: GPU+Memory stack in row 0, then Disk and
+	// Power form row 1 and must line up on the same output line.
+	cards := []cardData{
+		mk(iconCPU, "CPU", 11),
+		mk(iconGPU, "GPU", 6),
+		mk(iconMemory, "Memory", 4),
+		mk(iconDisk, "Disk", 3),
+		mk(iconBattery, "Power", 3),
+	}
+
+	out := stripANSI(renderTwoColumns(cards, 120))
+	aligned := false
+	for line := range strings.Lines(out) {
+		if strings.Contains(line, "Disk") && strings.Contains(line, "Power") {
+			aligned = true
+			break
+		}
+	}
+	if !aligned {
+		t.Errorf("Disk and Power titles should sit on the same row:\n%s", out)
+	}
+}
+
+func TestRenderTwoColumnsNeverGrowsFixedPairLayout(t *testing.T) {
+	const width = 120
+	cards := buildCards(MetricsSnapshot{}, width/2-4, 2, true)
+	cw := width/2 - 2
+
+	var fixedRows []string
+	for i := 0; i < len(cards); i += 2 {
+		left := renderCard(cards[i], cw)
+		if i+1 >= len(cards) {
+			fixedRows = append(fixedRows, left)
+			continue
+		}
+		right := renderCard(cards[i+1], cw)
+		fixedRows = append(fixedRows, lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right))
+	}
+	var spacedFixedRows []string
+	for i, row := range fixedRows {
+		if i > 0 {
+			spacedFixedRows = append(spacedFixedRows, "")
+		}
+		spacedFixedRows = append(spacedFixedRows, row)
+	}
+	fixed := lipgloss.JoinVertical(lipgloss.Left, spacedFixedRows...)
+	balanced := renderTwoColumns(cards, width)
+
+	if got, limit := lipgloss.Height(balanced), lipgloss.Height(fixed); got > limit {
+		t.Fatalf("balanced layout grew from %d to %d lines:\n%s", limit, got, stripANSI(balanced))
 	}
 }
 

@@ -75,19 +75,27 @@ EOF
 	[[ "$output" == *"ac"* ]]
 }
 
-@test "is_memory_pressure_high detects warning" {
-	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+@test "dry-run keeps healthy conditional system tasks unchanged" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=1 MOLE_ASSUME_VPN_ACTIVE=0 /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-memory_pressure() { echo "warning"; }
-export -f memory_pressure
-if is_memory_pressure_high; then
-    echo "high"
-fi
+
+mkdir -p "$HOME/bin"
+printf '#!/bin/bash\nexit 0\n' > "$HOME/bin/route"
+printf '#!/bin/bash\nexit 0\n' > "$HOME/bin/dscacheutil"
+chmod +x "$HOME/bin/route" "$HOME/bin/dscacheutil"
+PATH="$HOME/bin:$PATH"
+needs_permissions_repair() { return 1; }
+
+execute_optimization network_stack_optimize
+execute_optimization disk_permissions_repair
+[[ "$(optimize_outcome_count unchanged)" == "2" ]] || exit 1
 EOF
 
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"high"* ]]
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Network stack already optimal"* ]] || return 1
+	[[ "$output" == *"User directory permissions already optimal"* ]] || return 1
 }
 
 @test "opt_system_maintenance reports DNS and Spotlight" {
@@ -96,8 +104,11 @@ set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 flush_dns_cache() { return 0; }
-mdutil() { echo "Indexing enabled."; }
-opt_system_maintenance
+mkdir -p "$HOME/bin"
+printf '#!/bin/bash\necho "Indexing enabled."\n' > "$HOME/bin/mdutil"
+chmod +x "$HOME/bin/mdutil"
+PATH="$HOME/bin:$PATH"
+execute_optimization system_maintenance
 EOF
 
 	[ "$status" -eq 0 ]
@@ -111,7 +122,7 @@ set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 flush_dns_cache() { return 0; }
-opt_network_optimization
+execute_optimization network_optimization
 EOF
 
 	[ "$status" -eq 0 ]
@@ -178,6 +189,37 @@ EOF
 
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"count=0"* ]]
+}
+
+@test "opt_fix_broken_configs debug lists only successfully repaired paths" {
+	local test_home="$HOME/fixprefs-debug-paths"
+	local repaired="$test_home/Library/Preferences/com.example.repaired.plist"
+	local failed="$test_home/Library/Preferences/com.example.failed.plist"
+	run env HOME="$test_home" PROJECT_ROOT="$PROJECT_ROOT" MO_DEBUG=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/maintenance.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+
+prefs="$HOME/Library/Preferences"
+mkdir -p "$prefs"
+touch \
+    "$prefs/com.example.repaired.plist" \
+    "$prefs/com.example.failed.plist"
+
+plutil() { return 1; }
+safe_remove() {
+    [[ "$1" != *"failed.plist" ]]
+}
+
+execute_optimization fix_broken_configs
+EOF
+
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"Repaired 1 corrupted preference files"* ]] || return 1
+	[[ "$output" == *"Removed corrupted preference:"* ]] || return 1
+	[[ "$output" == *"$repaired"* ]] || return 1
+	[[ "$output" != *"$failed"* ]] || return 1
 }
 
 @test "fix_broken_preferences does not count protected Adobe plists" {
@@ -248,7 +290,7 @@ touch "$prefs/com.example.slow.plist"
 
 plutil() { return 0; }
 
-opt_fix_broken_configs
+execute_optimization fix_broken_configs
 EOF
 
 	[ "$status" -eq 0 ]
@@ -278,7 +320,7 @@ safe_remove() {
     echo "remove:$1:${3:-missing}" >> "$CALL_LOG"
 }
 
-opt_cache_refresh
+execute_optimization cache_refresh
 echo "cleaned=${OPTIMIZE_CACHE_CLEANED_KB:-missing}"
 cat "$CALL_LOG"
 EOF
@@ -290,12 +332,78 @@ EOF
 	[ "$(grep -c "size:$HOME/Library/Caches/com.apple.QuickLook.thumbnailcache" <<< "$output")" -eq 1 ]
 }
 
+@test "optimize scans never delete candidates from partial find output" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+
+saved="$HOME/Library/Saved Application State/Partial.savedState"
+shared="$HOME/Library/Application Support/com.apple.sharedfilelist/Partial.sfl3"
+mkdir -p "$saved" "${shared%/*}"
+touch "$shared"
+safe_remove() {
+    printf 'UNEXPECTED_REMOVE:%s\n' "$1"
+    return 0
+}
+run_with_timeout() {
+    shift
+    case "$*" in
+        *"Saved Application State"*) printf '%s\0' "$saved" ;;
+        *) printf '%s\0' "$shared" ;;
+    esac
+    return 73
+}
+
+optimize_task_start
+opt_saved_state_cleanup
+optimize_task_finish saved_state_cleanup
+optimize_task_start
+opt_shared_file_list_repair
+optimize_task_finish shared_file_list_repair
+EOF
+
+	[ "$status" -eq 0 ] || {
+		echo "$output"
+		return 1
+	}
+	[[ "$output" != *"UNEXPECTED_REMOVE"* ]]
+}
+
+@test "optimize saved-state cleanup propagates deletion interruption" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+
+saved="$HOME/Library/Saved Application State/Interrupted.savedState"
+mkdir -p "$saved"
+run_with_timeout() {
+    shift
+    printf '%s\0' "$saved"
+}
+should_protect_path() { return 1; }
+safe_remove() { return 130; }
+optimize_task_start
+rc=0
+opt_saved_state_cleanup || rc=$?
+printf 'RC=%s\n' "$rc"
+[[ $rc -eq 130 ]]
+EOF
+
+	[ "$status" -eq 0 ] || {
+		echo "$output"
+		return 1
+	}
+	[[ "$output" == *"RC=130"* ]]
+}
+
 @test "opt_quarantine_cleanup reports clean when no database" {
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=1 /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_quarantine_cleanup
+execute_optimization quarantine_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -315,7 +423,7 @@ local_db="$HOME/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
 sqlite3 "$local_db" "CREATE TABLE IF NOT EXISTS LSQuarantineEvent (id TEXT);"
 sqlite3 "$local_db" "INSERT INTO LSQuarantineEvent VALUES ('test1');"
 sqlite3 "$local_db" "INSERT INTO LSQuarantineEvent VALUES ('test2');"
-opt_quarantine_cleanup
+execute_optimization quarantine_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -329,7 +437,7 @@ set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 export PATH="/nonexistent"
-opt_quarantine_cleanup
+execute_optimization quarantine_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -341,8 +449,10 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_quarantine_cleanup() { echo "quarantine"; }
+opt_quarantine_cleanup() { echo "quarantine"; optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_APPLIED"; }
+optimize_outcomes_reset
 execute_optimization quarantine_cleanup
+[[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
@@ -354,30 +464,104 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+pgrep() { return 1; }
 export PATH="/nonexistent"
-opt_sqlite_vacuum
+execute_optimization sqlite_vacuum
 EOF
 
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"sqlite3 unavailable"* ]]
 }
 
+@test "opt_sqlite_vacuum reports failed when only some databases optimize" {
+	run env HOME="$HOME/sqlite-partial" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+
+mkdir -p "$HOME/Library/Messages" "$HOME/Library/Safari"
+touch "$HOME/Library/Messages/chat.db" "$HOME/Library/Safari/History.db"
+pgrep() { return 1; }
+file() { echo "SQLite 3.x database"; }
+get_file_size() { echo 1; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+sqlite3() {
+    case "$2" in
+        "PRAGMA page_count; PRAGMA freelist_count;") printf '100\n10\n' ;;
+        "PRAGMA integrity_check;") echo "ok" ;;
+        "VACUUM;") [[ "$1" == *"chat.db" ]] ;;
+    esac
+}
+export -f pgrep file get_file_size run_with_timeout sqlite3
+
+execute_optimization sqlite_vacuum
+[[ "$(optimize_outcome_count failed)" == "1" ]] || exit 1
+[[ "$(optimize_outcome_count applied)" == "0" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Optimized 1 databases"* ]] || return 1
+	[[ "$output" == *"Failed on 1 databases"* ]] || return 1
+}
+
+@test "opt_sqlite_vacuum reports a failed integrity probe" {
+	run env HOME="$HOME/sqlite-integrity" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+db="$HOME/Library/Messages/chat.db"
+mkdir -p "$(dirname "$db")"
+touch "$db"
+pgrep() { return 1; }
+file() { echo "SQLite 3.x database"; }
+get_file_size() { echo 1; }
+run_with_timeout() {
+    shift
+    if [[ "$3" == "PRAGMA page_count; PRAGMA freelist_count;" ]]; then
+        printf '100\n10\n'
+        return 0
+    fi
+    return 7
+}
+sqlite3() { return 0; }
+export -f pgrep file get_file_size run_with_timeout sqlite3
+
+execute_optimization sqlite_vacuum
+[[ "$(optimize_outcome_count failed)" == "1" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Failed on 1 databases"* ]] || return 1
+}
+
+@test "opt_sqlite_vacuum reports oversized databases as skipped" {
+	run env HOME="$HOME/sqlite-oversized" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+db="$HOME/Library/Messages/chat.db"
+mkdir -p "$(dirname "$db")"
+touch "$db"
+pgrep() { return 1; }
+file() { echo "SQLite 3.x database"; }
+get_file_size() { echo $((MOLE_SQLITE_MAX_SIZE + 1)); }
+export -f pgrep file get_file_size
+
+execute_optimization sqlite_vacuum
+[[ "$(optimize_outcome_count skipped)" == "1" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Skipped 1 databases over the 100 MB safety limit"* ]] || return 1
+}
+
 @test "optimize does not auto-fix Gatekeeper anymore" {
 	run grep -n "spctl --master-enable\\|SECURITY_FIXES+=([\"']gatekeeper|" "$PROJECT_ROOT/bin/optimize.sh"
 
 	[ "$status" -eq 1 ]
-}
-
-@test "opt_dock_refresh reports refresh" {
-	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=1 /bin/bash --noprofile --norc <<'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_dock_refresh
-EOF
-
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"Dock refreshed"* ]]
 }
 
 @test "opt_prevent_network_dsstore dry-run reports enabled" {
@@ -391,7 +575,7 @@ defaults() {
         write) return 0 ;;
     esac
 }
-opt_prevent_network_dsstore
+execute_optimization prevent_network_dsstore
 EOF
 
 	[ "$status" -eq 0 ]
@@ -410,11 +594,34 @@ defaults() {
     fi
     return 0
 }
-opt_prevent_network_dsstore
+execute_optimization prevent_network_dsstore
 EOF
 
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"already enabled"* ]]
+}
+
+@test "opt_prevent_network_dsstore reports a partial write failure" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+defaults() {
+    if [[ "$1" == "read" ]]; then
+        return 1
+    fi
+    [[ "$3" == "DSDontWriteNetworkStores" ]]
+}
+export -f defaults
+
+execute_optimization prevent_network_dsstore
+[[ "$(optimize_outcome_count failed)" == "1" ]] || exit 1
+[[ "$(optimize_outcome_count applied)" == "0" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *".DS_Store prevention enabled"* ]] || return 1
+	[[ "$output" == *"Failed to enable .DS_Store prevention for 1 volume type(s)"* ]] || return 1
 }
 
 @test "opt_legacy_overrides_audit stays silent-positive when defaults are in effect" {
@@ -427,7 +634,7 @@ defaults() {
     echo "DELETE_CALLED:$*"
     return 0
 }
-opt_legacy_overrides_audit
+execute_optimization legacy_overrides_audit
 EOF
 
 	[ "$status" -eq 0 ] || return 1
@@ -451,7 +658,7 @@ defaults() {
     echo "DELETE_CALLED:$2 $3"
     return 0
 }
-opt_legacy_overrides_audit
+execute_optimization legacy_overrides_audit
 EOF
 
 	[ "$status" -eq 0 ] || return 1
@@ -475,7 +682,7 @@ defaults() {
     echo "DELETE_CALLED:$*"
     return 0
 }
-opt_legacy_overrides_audit
+execute_optimization legacy_overrides_audit
 EOF
 
 	[ "$status" -eq 0 ] || return 1
@@ -497,12 +704,36 @@ defaults() {
     return 0
 }
 is_path_whitelisted() { [[ "$1" == *".GlobalPreferences.plist" ]]; }
-opt_legacy_overrides_audit
+execute_optimization legacy_overrides_audit
 EOF
 
 	[ "$status" -eq 0 ] || return 1
 	[[ "$output" == *"Skipped (whitelisted): App Nap disabled globally"* ]] || return 1
 	[[ "$output" != *"DELETE_CALLED"* ]] || return 1
+}
+
+@test "opt_legacy_overrides_audit reports failed after a partial repair" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+defaults() {
+    if [[ "$1" == "read" ]]; then
+        echo "1"
+        return 0
+    fi
+    [[ "$3" == "NSAppSleepDisabled" ]]
+}
+export -f defaults
+
+execute_optimization legacy_overrides_audit
+[[ "$(optimize_outcome_count failed)" == "1" ]] || exit 1
+[[ "$(optimize_outcome_count applied)" == "0" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Removed override: App Nap disabled globally"* ]] || return 1
+	[[ "$output" == *"Could not remove override"* ]] || return 1
 }
 
 # cc31ee3a ("Remove optimize confirmation prompt, run all tasks automatically")
@@ -533,12 +764,14 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_dock_refresh() { echo "dock"; }
-execute_optimization dock_refresh
+opt_cache_refresh() { echo "cache"; optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_APPLIED"; }
+optimize_outcomes_reset
+execute_optimization cache_refresh
+[[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"dock"* ]]
+	[[ "$output" == *"cache"* ]]
 }
 
 @test "execute_optimization rejects unknown action" {
@@ -546,6 +779,19 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+execute_optimization unknown_action
+EOF
+
+	[ "$status" -eq 1 ] || return 1
+	[[ "$output" == *"Unknown action"* ]] || return 1
+}
+
+@test "execute_optimization rejects unknown action before whitelist policy" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+is_whitelisted() { return 0; }
 execute_optimization unknown_action
 EOF
 
@@ -575,7 +821,7 @@ defaults() {
     esac
 }
 bundle_has_installed_app() { [[ "$1" == "com.installed.App" ]]; }
-opt_prune_spotlight_orphan_rules
+execute_optimization spotlight_orphan_rules_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -607,7 +853,7 @@ defaults() {
     esac
 }
 bundle_has_installed_app() { return 1; }
-opt_prune_spotlight_orphan_rules
+execute_optimization spotlight_orphan_rules_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -637,12 +883,41 @@ defaults() {
     esac
 }
 bundle_has_installed_app() { return 0; }
-opt_prune_spotlight_orphan_rules
+execute_optimization spotlight_orphan_rules_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"already clean"* ]] || return 1
 	[[ "$output" != *"DEFAULTS: write"* ]]
+}
+
+@test "opt_prune_spotlight_orphan_rules propagates an interrupted app resolver" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+PLIST="$HOME/Library/Preferences/com.apple.spotlight.plist"
+mkdir -p "$(dirname "$PLIST")"
+rm -f "$PLIST"
+/usr/libexec/PlistBuddy \
+    -c "Add :EnabledPreferenceRules array" \
+    -c "Add :EnabledPreferenceRules:0 string com.example.Interrupted" \
+    "$PLIST" >/dev/null 2>&1
+defaults() {
+    case "$1" in
+        read) return 0 ;;
+        write | delete) echo "UNEXPECTED_WRITE: $*" ;;
+    esac
+}
+bundle_has_installed_app() { return 130; }
+rc=0
+opt_prune_spotlight_orphan_rules || rc=$?
+printf 'RC=%s\n' "$rc"
+EOF
+
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == *"RC=130"* ]] || return 1
+	[[ "$output" != *"UNEXPECTED_WRITE"* ]]
 }
 
 @test "opt_spotlight_index_optimize reports optimal when probes are fast" {
@@ -657,7 +932,7 @@ PATH="$STUB:$PATH"
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 is_ac_power() { return 0; }
-opt_spotlight_index_optimize
+execute_optimization spotlight_index_optimize
 echo "probes=$(wc -l < "$HOME/mdfind-calls.log" | tr -d ' ')"
 EOF
 
@@ -678,7 +953,7 @@ PATH="$STUB:$PATH"
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 is_ac_power() { return 1; }
-opt_spotlight_index_optimize
+execute_optimization spotlight_index_optimize
 [[ -f "$HOME/mdfind-battery.log" ]] && echo "probed" || echo "no-probe"
 EOF
 
@@ -699,7 +974,7 @@ PATH="$STUB:$PATH"
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 is_ac_power() { return 0; }
-opt_spotlight_index_optimize
+execute_optimization spotlight_index_optimize
 EOF
 
 	[ "$status" -eq 0 ]
@@ -712,7 +987,7 @@ set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 defaults() { return 1; }
-opt_prune_spotlight_orphan_rules
+execute_optimization spotlight_orphan_rules_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -724,8 +999,10 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_prune_spotlight_orphan_rules() { echo "pruned"; }
+opt_prune_spotlight_orphan_rules() { echo "pruned"; optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_APPLIED"; }
+optimize_outcomes_reset
 execute_optimization spotlight_orphan_rules_cleanup
+[[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
@@ -741,7 +1018,7 @@ get_lsregister_path() {
     echo ""
     return 0
 }
-opt_launch_services_rebuild
+execute_optimization launch_services_rebuild
 echo "survived"
 EOF
 
@@ -755,7 +1032,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_launch_agents_cleanup
+execute_optimization launch_agents_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -784,7 +1061,7 @@ cat > "$HOME/Library/LaunchAgents/com.test.broken.plist" <<'PLIST'
 </plist>
 PLIST
 safe_remove() { return 0; }
-opt_launch_agents_cleanup
+execute_optimization launch_agents_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -814,7 +1091,7 @@ cat > "$HOME/Library/LaunchAgents/com.test.healthy.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-opt_launch_agents_cleanup
+execute_optimization launch_agents_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -845,7 +1122,7 @@ cat > "$HOME/Library/LaunchAgents/com.test.external.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-opt_launch_agents_cleanup
+execute_optimization launch_agents_cleanup
 EOF
 
 	[ "$status" -eq 0 ]
@@ -857,8 +1134,10 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_launch_agents_cleanup() { echo "launch_agents"; }
+opt_launch_agents_cleanup() { echo "launch_agents"; optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_APPLIED"; }
+optimize_outcomes_reset
 execute_optimization launch_agents_cleanup
+[[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
@@ -874,7 +1153,8 @@ periodic() { true; }
 export -f periodic
 tmplog="$(mktemp /tmp/mole-test-daily.XXXXXX)"
 touch "$tmplog"
-MOLE_PERIODIC_LOG="$tmplog" opt_periodic_maintenance
+MOLE_PERIODIC_LOG="$tmplog" execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count unchanged)" == "1" ]] || exit 1
 rm -f "$tmplog"
 EOF
 
@@ -898,7 +1178,8 @@ STAT
 chmod +x "$tmpdir/bin/stat"
 tmplog="$tmpdir/daily.out"
 touch "$tmplog"
-PATH="$tmpdir/bin:$PATH" MOLE_PERIODIC_LOG="$tmplog" opt_periodic_maintenance
+PATH="$tmpdir/bin:$PATH" MOLE_PERIODIC_LOG="$tmplog" execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count unchanged)" == "1" ]] || exit 1
 rm -rf "$tmpdir"
 EOF
 
@@ -916,7 +1197,8 @@ periodic() { true; }
 export -f periodic
 tmplog="$(mktemp /tmp/mole-test-daily.XXXXXX)"
 touch -t "$(date -v-10d +%Y%m%d%H%M.%S)" "$tmplog"
-MOLE_PERIODIC_LOG="$tmplog" opt_periodic_maintenance
+MOLE_PERIODIC_LOG="$tmplog" execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
 rm -f "$tmplog"
 EOF
 
@@ -931,11 +1213,88 @@ source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 periodic() { true; }
 export -f periodic
-MOLE_PERIODIC_LOG="/tmp/mole-test-nonexistent-daily.out" opt_periodic_maintenance
+MOLE_PERIODIC_LOG="/tmp/mole-test-nonexistent-daily.out" execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"Periodic maintenance triggered"* ]]
+}
+
+@test "opt_periodic_maintenance reports skipped without admin access" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+periodic() { true; }
+export -f periodic
+MOLE_PERIODIC_LOG="$HOME/missing-daily.out" execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count skipped)" == "1" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Periodic maintenance skipped (requires sudo)"* ]] || return 1
+}
+
+@test "opt_periodic_maintenance reports command failure" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=0 MOLE_TEST_MODE=0 MOLE_OPTIMIZE_SUDO_AVAILABLE=true /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+periodic() { true; }
+sudo() { return 7; }
+export -f periodic sudo
+MOLE_PERIODIC_LOG="$HOME/missing-daily.out" execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count failed)" == "1" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Failed to run periodic maintenance (exit=7)"* ]] || return 1
+}
+
+@test "opt_disk_verify reports a timed out probe as failed" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_ENABLE_DISK_VERIFY=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+run_with_timeout() { return 124; }
+
+execute_optimization disk_verify
+[[ "$(optimize_outcome_count failed)" == "1" ]] || exit 1
+[[ "$(optimize_outcome_count unchanged)" == "0" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Disk verification timed out"* ]] || return 1
+}
+
+@test "opt_network_stack_optimize reports a partial flush failure" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_ASSUME_VPN_ACTIVE=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+mkdir -p "$HOME/bin"
+printf '#!/bin/bash\nexit 1\n' > "$HOME/bin/route"
+printf '#!/bin/bash\nexit 1\n' > "$HOME/bin/dscacheutil"
+chmod +x "$HOME/bin/route" "$HOME/bin/dscacheutil"
+PATH="$HOME/bin:$PATH"
+optimize_sudo_available() { return 0; }
+sudo() {
+    if [[ "$1" == "route" ]]; then
+        return 0
+    fi
+    return 7
+}
+export -f optimize_sudo_available sudo
+
+execute_optimization network_stack_optimize
+[[ "$(optimize_outcome_count failed)" == "1" ]] || exit 1
+[[ "$(optimize_outcome_count applied)" == "0" ]] || exit 1
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Network routing table refreshed"* ]] || return 1
+	[[ "$output" == *"Network stack refresh incomplete (1 operation(s) failed)"* ]] || return 1
 }
 
 @test "run_optimize_diagnostics flags sustained CloudShell as primary bottleneck" {
@@ -1120,6 +1479,47 @@ EOF
 	[[ "$double" == *"Detached 2 mounted images"* ]] || return 1
 }
 
+@test "opt_diag_offer_detach_candidates renders image paths without terminal escapes" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" NO_COLOR=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/diagnostics.sh"
+image_path=$'/Users/test/Bad\\033[2J-\033[2J.dmg'
+mount_path=$'/Volumes/Bad\\033[H-\033[H'
+MOLE_DRY_RUN=1 opt_diag_offer_detach_candidates "${image_path}"$'\t'"${mount_path}"
+EOF
+
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *'Bad\033[2J-'* ]] || return 1
+	[[ "$output" == *'/Volumes/Bad\033[H-'* ]] || return 1
+	[[ "$output" != *$'\033[2J'* ]] || return 1
+	[[ "$output" != *$'\033[H'* ]]
+}
+
+@test "opt_diag_detach_candidates renders result paths without terminal escapes" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" NO_COLOR=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/diagnostics.sh"
+run_with_timeout() {
+	shift
+	shift
+	shift
+	[[ "$1" == *Success* ]]
+}
+success_mount=$'/Volumes/Success\\033[2J-\033[2J'
+failed_mount=$'/Volumes/Failed\\033[H-\033[H'
+candidates="/tmp/one.dmg"$'\t'"$success_mount"$'\n'"/tmp/two.dmg"$'\t'"$failed_mount"
+opt_diag_detach_candidates "$candidates"
+EOF
+
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *'Detached /Volumes/Success\033[2J-'* ]] || return 1
+	[[ "$output" == *'Failed to detach /Volumes/Failed\033[H-'* ]] || return 1
+	[[ "$output" != *$'\033[2J'* ]] || return 1
+	[[ "$output" != *$'\033[H'* ]]
+}
+
 @test "opt_periodic_maintenance skips when periodic command missing" {
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
@@ -1132,7 +1532,8 @@ command() {
     builtin command "$@"
 }
 export -f command
-opt_periodic_maintenance
+execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count unavailable)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
@@ -1144,8 +1545,10 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-opt_periodic_maintenance() { echo "periodic"; }
+opt_periodic_maintenance() { echo "periodic"; optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_APPLIED"; }
+optimize_outcomes_reset
 execute_optimization periodic_maintenance
+[[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
@@ -1157,14 +1560,16 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-is_whitelisted() { [[ "$1" == "dock_refresh" ]]; }
-opt_dock_refresh() { echo "UNEXPECTED_DOCK"; }
-execute_optimization dock_refresh
+is_whitelisted() { [[ "$1" == "cache_refresh" ]]; }
+opt_cache_refresh() { echo "UNEXPECTED_CACHE"; }
+optimize_outcomes_reset
+execute_optimization cache_refresh
+[[ "$(optimize_outcome_count skipped)" == "1" ]] || exit 1
 EOF
 
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"Skipped (whitelisted): dock_refresh"* ]] || return 1
-	[[ "$output" != *"UNEXPECTED_DOCK"* ]]
+	[[ "$output" == *"Skipped (whitelisted): Finder Cache Refresh"* ]] || return 1
+	[[ "$output" != *"UNEXPECTED_CACHE"* ]]
 }
 
 @test "optimize whitelist is loaded before system health checks" {
@@ -1179,6 +1584,18 @@ EOF
 
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"ordered"* ]]
+}
+
+@test "optimize interrupt cleanup disables the EXIT trap before cleanup" {
+	run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+body=$(sed -n '/^handle_interrupt() {/,/^}/p' "$PROJECT_ROOT/bin/optimize.sh")
+trap_line=$(printf '%s\n' "$body" | awk '/trap - EXIT/ { print NR; exit }')
+cleanup_line=$(printf '%s\n' "$body" | awk '/^[[:space:]]*cleanup_all 130$/ { print NR; exit }')
+[[ -n "$trap_line" && -n "$cleanup_line" && "$trap_line" -lt "$cleanup_line" ]]
+EOF
+
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
 }
 
 @test "show_system_health formats floats under comma-decimal locales (#1220)" {
@@ -1374,7 +1791,6 @@ sudo() {
 export -f sudo
 
 # Force the "needs work" branch so each task reaches its sudo block.
-is_memory_pressure_high() { return 0; }
 needs_permissions_repair() { return 0; }
 has_active_vpn_interface() { return 1; }
 route() { return 1; }
@@ -1393,10 +1809,9 @@ opt_msg() { :; }
 start_inline_spinner() { :; }
 stop_inline_spinner() { :; }
 
-opt_memory_pressure_relief 2>&1 || true
-opt_network_stack_optimize 2>&1 || true
-opt_disk_permissions_repair 2>&1 || true
-opt_periodic_maintenance 2>&1 || true
+execute_optimization network_stack_optimize 2>&1 || true
+execute_optimization disk_permissions_repair 2>&1 || true
+execute_optimization periodic_maintenance 2>&1 || true
 flush_dns_cache 2>&1 || true
 
 if [[ -s "$trace" ]]; then
@@ -1483,17 +1898,21 @@ EOF
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-scutil() {
-    cat <<'NC'
+mock_bin="$HOME/vpn-connected-bin"
+mkdir -p "$mock_bin"
+cat > "$mock_bin/scutil" <<'MOCK'
+#!/bin/bash
+cat <<'OUTPUT'
 * (Disconnected)   AA1B2C3D-1111-2222-3333-444455556666   PPP     (L2TP)         "Office VPN"   [L2TP]
 * (Connected)      87654321-aaaa-bbbb-cccc-dddddddddddd   IPSec   (IKEv2)        "Remote Office"[IKEv2]
-NC
-}
-export -f scutil
+OUTPUT
+MOCK
 # Default route should NOT be consulted once scutil already proved a VPN active.
-route() { echo "should not be called" >&2; return 1; }
-export -f route
+printf '#!/bin/bash\ntouch "$HOME/route-called"\nexit 1\n' > "$mock_bin/route"
+chmod +x "$mock_bin/scutil" "$mock_bin/route"
+PATH="$mock_bin:$PATH"
 if has_active_vpn_interface; then echo "vpn"; else echo "no_vpn"; fi
+[[ ! -e "$HOME/route-called" ]] || echo "should not be called"
 EOF
 
 	[ "$status" -eq 0 ]
@@ -1505,23 +1924,19 @@ EOF
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-scutil() {
-    cat <<'NC'
+mock_bin="$HOME/vpn-disconnected-bin"
+mkdir -p "$mock_bin"
+cat > "$mock_bin/scutil" <<'MOCK'
+#!/bin/bash
+cat <<'OUTPUT'
 * (Disconnected)   AA1B2C3D-1111-2222-3333-444455556666   PPP     (L2TP)         "Office VPN"   [L2TP]
 * (Disconnected)   87654321-aaaa-bbbb-cccc-dddddddddddd   IPSec   (IKEv2)        "Remote Office"[IKEv2]
-NC
-}
+OUTPUT
+MOCK
 # Default route via en0 (no VPN). This is the user's case in #959.
-route() {
-    cat <<'ROUTE'
-   route to: default
-destination: default
-       mask: default
-    gateway: 192.168.1.1
-  interface: en0
-ROUTE
-}
-export -f scutil route
+printf '%s\n' '#!/bin/bash' 'echo "  interface: en0"' > "$mock_bin/route"
+chmod +x "$mock_bin/scutil" "$mock_bin/route"
+PATH="$mock_bin:$PATH"
 if has_active_vpn_interface; then echo "vpn"; else echo "no_vpn"; fi
 EOF
 
@@ -1534,18 +1949,13 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 # No system-managed VPN configured in scutil.
-scutil() { echo ""; }
+mock_bin="$HOME/vpn-full-tunnel-bin"
+mkdir -p "$mock_bin"
+printf '%s\n' '#!/bin/bash' 'exit 0' > "$mock_bin/scutil"
 # Default route owned by utun3 -> full-tunnel VPN (WireGuard / OpenVPN style).
-route() {
-    cat <<'ROUTE'
-   route to: default
-destination: default
-       mask: default
-    gateway: 10.8.0.1
-  interface: utun3
-ROUTE
-}
-export -f scutil route
+printf '%s\n' '#!/bin/bash' 'echo "  interface: utun3"' > "$mock_bin/route"
+chmod +x "$mock_bin/scutil" "$mock_bin/route"
+PATH="$mock_bin:$PATH"
 if has_active_vpn_interface; then echo "vpn"; else echo "no_vpn"; fi
 EOF
 
@@ -1560,42 +1970,17 @@ source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 # Private Relay / Continuity create utun* but the default route stays on en0.
 # The old netstat/ifconfig probe would have false-positived this; the new
 # probe must not.
-scutil() { echo ""; }
-route() {
-    cat <<'ROUTE'
-   route to: default
-destination: default
-       mask: default
-    gateway: 192.168.1.1
-  interface: en0
-ROUTE
-}
-export -f scutil route
+mock_bin="$HOME/vpn-private-relay-bin"
+mkdir -p "$mock_bin"
+printf '%s\n' '#!/bin/bash' 'exit 0' > "$mock_bin/scutil"
+printf '%s\n' '#!/bin/bash' 'echo "  interface: en0"' > "$mock_bin/route"
+chmod +x "$mock_bin/scutil" "$mock_bin/route"
+PATH="$mock_bin:$PATH"
 if has_active_vpn_interface; then echo "vpn"; else echo "no_vpn"; fi
 EOF
 
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"no_vpn"* ]]
-}
-
-@test "opt_dock_refresh preserves desktoppicture.db and other db files (#995)" {
-	local dock_support="$HOME/Library/Application Support/Dock"
-	mkdir -p "$dock_support"
-	: > "$dock_support/desktoppicture.db"
-	: > "$dock_support/another.db"
-
-	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-killall() { return 0; }
-export -f killall
-opt_dock_refresh
-EOF
-
-	[ "$status" -eq 0 ]
-	[ -f "$HOME/Library/Application Support/Dock/desktoppicture.db" ]
-	[ -f "$HOME/Library/Application Support/Dock/another.db" ]
 }
 
 @test "opt_diag_parse_image_mount_pairs handles multiple blocks" {
