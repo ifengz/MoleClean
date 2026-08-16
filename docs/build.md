@@ -65,6 +65,10 @@ workflow 会检查上游 Mole 正式版本，更新内核并执行兼容性检�
 
 确认 PR 后合并到 `main/blue-theme`，再删除对应的临时分支。
 
+首次使用前，需要在仓库 `Settings` -> `Actions` -> `General` 的 `Workflow permissions` 中选择
+`Read and write permissions`，并勾选 `Allow GitHub Actions to create and approve pull requests`。
+否则更新、构建和兼容性检查仍会完成，但最后创建 PR 会失败。
+
 ## 命令行触发
 
 需要安装并登录 GitHub CLI：
