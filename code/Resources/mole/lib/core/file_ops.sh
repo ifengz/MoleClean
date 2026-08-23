@@ -409,35 +409,54 @@ _mole_user_cache_owner_process_state() {
 }
 
 # Is the database family live? 0 = in use, 1 = idle, 2 = could not tell.
-# WAL-mode -shm only exists while at least one connection is open (PR #1391).
+# WAL-mode -shm only exists while at least one connection is open (PR #1391),
+# but a stale -shm can remain after an unclean exit. When -shm exists we must
+# still verify a process holds it open; otherwise the guard refuses forever on
+# orphaned caches (#1439).
 _mole_sqlite_database_in_use() {
     local path="$1"
     local base
     base=$(_mole_sqlite_family_base_path "$path")
 
-    if [[ -f "${base}-shm" ]]; then
-        return 0
-    fi
-
     command -v lsof > /dev/null 2>&1 || return 2
 
+    # Check every family member, including a stale -shm. If any process has a
+    # handle open the database is live; if none do, the -shm is orphaned and
+    # deletion is safe. One lsof call covers the whole family: forking it per
+    # member tripled the live-cache gate's cost once the -shm fast path went
+    # away (#1439), and lsof already accepts several names at once.
     local candidate
+    local -a family=()
     for candidate in "$base" "${base}-wal" "${base}-shm"; do
         [[ -e "$candidate" ]] || continue
-        local lsof_rc=0
-        if declare -f run_with_timeout > /dev/null 2>&1; then
-            run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" lsof -F n -- "$candidate" \
-                > /dev/null 2>&1 || lsof_rc=$?
-        else
-            lsof -F n -- "$candidate" > /dev/null 2>&1 || lsof_rc=$?
-        fi
-        if [[ $lsof_rc -eq 0 ]]; then
-            return 0
-        fi
-        if [[ $lsof_rc -ne 1 ]]; then
-            return 2
-        fi
+        family[${#family[@]}]="$candidate"
     done
+    # Guard the empty expansion: macOS /bin/bash is 3.2, where "${a[@]}" on an
+    # empty array is an unbound-variable error under set -u.
+    [[ ${#family[@]} -gt 0 ]] || return 1
+
+    # Exit status cannot carry the answer here. lsof returns 1 whenever it fails
+    # to locate ANY requested name, so a family with one open member and one
+    # closed member still exits 1. Its stdout can: a record is printed only for
+    # a name some process holds open. Read the records, not the status.
+    local lsof_rc=0
+    local open_records=""
+    if declare -f run_with_timeout > /dev/null 2>&1; then
+        open_records=$(run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" lsof -F n -- \
+            "${family[@]}" 2> /dev/null) || lsof_rc=$?
+    else
+        open_records=$(lsof -F n -- "${family[@]}" 2> /dev/null) || lsof_rc=$?
+    fi
+    # Status 0 means lsof located every name it was given, which for this query
+    # can only happen when some process holds them. Take either signal: a record
+    # on stdout, or a clean exit. Requiring both would read a mocked or
+    # output-suppressed lsof as idle, and "idle" is the answer that deletes.
+    if [[ -n "$open_records" || $lsof_rc -eq 0 ]]; then
+        return 0
+    fi
+    # Exactly status 1 with no records means every member is idle. Anything else
+    # (timeout, signal, lsof error) is not evidence of idleness.
+    [[ $lsof_rc -eq 1 ]] || return 2
     return 1
 }
 
@@ -470,22 +489,66 @@ _mole_should_refuse_live_user_cache_path() {
     if _mole_is_user_cache_sqlite_family_path "$path"; then
         local open_state=0
         _mole_user_cache_sqlite_has_open_handle "$path" || open_state=$?
-        if [[ $open_state -eq 0 ]]; then
-            debug_log "Open SQLite user cache handle, keep: $path"
+        if [[ $open_state -eq 0 || $open_state -eq 2 ]]; then
+            debug_log "SQLite user cache handle not conclusively idle, keep: $path"
             return 0
         fi
-        # open_state 2 (lsof missing) with no -shm: process probe already idle.
     elif [[ -d "$path" ]]; then
-        local candidate open_state
-        for candidate in "$path/Cache.db" "$path"/*.db; do
-            [[ -f "$candidate" ]] || continue
-            open_state=0
-            _mole_user_cache_sqlite_has_open_handle "$candidate" || open_state=$?
-            if [[ $open_state -eq 0 ]]; then
-                debug_log "Open SQLite under user cache dir, keep: $path ($candidate)"
-                return 0
-            fi
-        done
+        # A caller's GLOBIGNORE would silently hide database files from this
+        # glob, which reads as "no SQLite here" and unblocks the delete. Shadow
+        # it with an empty local: bash restores the caller's value AND its
+        # attributes on return, so no manual save, `declare -p` parsing, or
+        # export-state replay is needed. An empty GLOBIGNORE also turns off the
+        # dotglob that bash auto-enables for a non-empty one, so dotglob is set
+        # explicitly below and restored by hand (shopt state is not scoped).
+        # failglob off keeps an empty cache directory yielding a literal that
+        # the -f test drops. Both shopt flags are saved because cleanup helpers
+        # elsewhere in the tree set them without restoring. nullglob is left
+        # alone: either state reaches the same -f filter.
+        local GLOBIGNORE=""
+        local candidate open_state family_base seen_base already_seen
+        local restore_dotglob=false
+        local restore_failglob=false
+        local -a sqlite_candidates=()
+        local -a sqlite_family_bases=()
+
+        if shopt -q dotglob; then
+            restore_dotglob=true
+        fi
+        if shopt -q failglob; then
+            restore_failglob=true
+        fi
+        shopt -s dotglob
+        shopt -u failglob
+        sqlite_candidates=("$path"/*)
+        if [[ "$restore_dotglob" != "true" ]]; then shopt -u dotglob; fi
+        if [[ "$restore_failglob" == "true" ]]; then shopt -s failglob; fi
+
+        if [[ ${#sqlite_candidates[@]} -gt 0 ]]; then
+            for candidate in "${sqlite_candidates[@]}"; do
+                [[ -f "$candidate" ]] || continue
+                _mole_is_user_cache_sqlite_family_path "$candidate" || continue
+                family_base=$(_mole_sqlite_family_base_path "$candidate")
+                already_seen=false
+                if [[ ${#sqlite_family_bases[@]} -gt 0 ]]; then
+                    for seen_base in "${sqlite_family_bases[@]}"; do
+                        if [[ "$seen_base" == "$family_base" ]]; then
+                            already_seen=true
+                            break
+                        fi
+                    done
+                fi
+                [[ "$already_seen" == "true" ]] && continue
+                sqlite_family_bases[${#sqlite_family_bases[@]}]="$family_base"
+
+                open_state=0
+                _mole_user_cache_sqlite_has_open_handle "$family_base" || open_state=$?
+                if [[ $open_state -eq 0 || $open_state -eq 2 ]]; then
+                    debug_log "SQLite under user cache dir not conclusively idle, keep: $path ($family_base)"
+                    return 0
+                fi
+            done
+        fi
     fi
 
     return 1
@@ -1024,9 +1087,15 @@ safe_remove() {
     # returns non-zero to refuse.
     local final_sink_guard="${_MOLE_SAFE_REMOVE_FINAL_GUARD:-}"
     if [[ -n "$final_sink_guard" ]] && declare -f "$final_sink_guard" > /dev/null 2>&1; then
-        if ! "$final_sink_guard" "$path"; then
+        local final_sink_guard_rc=0
+        "$final_sink_guard" "$path" || final_sink_guard_rc=$?
+        if [[ $final_sink_guard_rc -ne 0 ]]; then
             debug_log "Refusing removal after the final sink guard denied: $path"
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "SKIPPED" "$path" "sink guard denied"
+            if [[ $final_sink_guard_rc -eq 124 || $final_sink_guard_rc -ge 128 ]]; then
+                _mole_record_clean_cancellation "$final_sink_guard_rc"
+                return "$final_sink_guard_rc"
+            fi
             return 1
         fi
     fi
