@@ -13,10 +13,12 @@
 </p>
 
 <p align="center">
-  <img src="https://gw.alipayobjects.com/zos/k/ro/ZzF8e8.png" alt="Mole - 95.50GB freed" width="1000" />
+  <img src="./docs/img/big-mole.png" alt="Mole cleanup results" width="1000" />
 </p>
 
-> Prefer a native app? [Mole for Mac](https://mole.fit) brings cleanup, app management, maintenance, disk maps, and live status into one lightweight, VoiceOver-ready app. It is $19 once and covers 2 Macs, with lifetime updates and a 14-day refund. The license moves with you when you replace a Mac. [Download and try it](https://mole.fit/download). The CLI stays free and open source.
+> Prefer a native app? [Mole for Mac](https://mole.fit/) brings cleanup, app management, maintenance, disk maps, and live status into one lightweight, VoiceOver-ready app. One license covers 2 Macs with lifetime updates and a 14-day refund. The CLI stays free and open source.
+>
+> Mac app details: [Cleaner](https://mole.fit/mac-cleaner), [App Uninstaller](https://mole.fit/mac-app-uninstaller), [Optimizer](https://mole.fit/mac-optimizer), [Disk Analyzer](https://mole.fit/mac-disk-analyzer), and [System Monitor](https://mole.fit/mac-system-monitor).
 
 ## Features
 
@@ -264,9 +266,9 @@ Read    ▮▯▯▯▯  2.1 MB/s                  Health  Normal · 423 cycles
 Write   ▮▮▮▯▯  18.3 MB/s                 Temp    58°C · 1200 RPM
 
 ⇅ Network                                ▶ Processes
-Down    ▁▁█▂▁▁▁▁▁▁▁▁▇▆▅▂  0.54 MB/s      Code       ▮▮▮▮▯  42.1%
-Up      ▄▄▄▃▃▃▄▆▆▇█▁▁▁▁▁  0.02 MB/s      Chrome     ▮▮▮▯▯  28.3%
-Proxy   HTTP · 192.168.1.100             Terminal   ▮▯▯▯▯  12.5%
+Down    ▁▁█▂▁▁▁▁▁▁▁▁▇▆▅▂  0.54 MB/s      Zombies 3 · Chrome (4242) ×3
+Up      ▄▄▄▃▃▃▄▆▆▇█▁▁▁▁▁  0.02 MB/s      Code       ▮▮▮▮▯  42.1%
+Proxy   HTTP · 192.168.1.100             Chrome     ▮▮▮▯▯  28.3%
 ```
 
 The health score combines CPU, memory, disk capacity, SMART status, I/O, thermals, battery state, and uptime, with color-coded ranges. Press `k` to toggle the cat, `c` to cycle the number of CPU cores shown, or `q` to quit. Display preferences are saved.
@@ -302,9 +304,24 @@ $ mo status --json
   "cpu": { "usage": 45.2, "logical_cpu": 8 },
   "memory": { "total": 34359738368, "used": 20078972109, "used_percent": 58.4 },
   "disks": [],
+  "process_collected_at": "2026-08-29T12:30:00Z",
+  "process_stale": false,
+  "zombie_count": 3,
+  "zombie_parents": [
+    { "pid": 4242, "name": "Google Chrome for Testing", "count": 3 }
+  ],
+  "zombie_parents_complete": true,
   "uptime": "3d 12h 45m"
 }
 ```
+
+Zombie diagnostics are read-only and do not affect the health score or terminate processes. Before
+Mole has a successful process sample, `process_collected_at`, `process_stale`, `zombie_count`, and
+`zombie_parents_complete` are omitted and `zombie_parents` is `null`. Later fast/watch snapshots
+reuse the latest successful sample with its original `process_collected_at` and set
+`process_stale: true`; a live process sample sets it to `false`. A count of `0` means Mole measured
+no zombies. Parent summaries contain at most three known owners;
+`zombie_parents_complete: false` means attribution was unavailable, incomplete, or truncated.
 
 Status also supports read-only alerts for processes that stay above a CPU threshold. Use `--proc-cpu-threshold`, `--proc-cpu-window`, or `--proc-cpu-alerts=false` to tune or disable them.
 
@@ -413,7 +430,7 @@ Thanks to everyone who helped build Mole. Go follow them. ❤️
 <br/><br/>
 Real feedback from users who shared Mole on X.
 
-<img src="https://gw.alipayobjects.com/zos/k/dl/lovemole.jpeg" alt="Community feedback on Mole" width="1000" />
+<img src="./docs/img/mole-love.png" alt="Community feedback on Mole" width="1000" />
 
 ## Support
 
