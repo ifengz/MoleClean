@@ -1057,6 +1057,82 @@ EOF
     [ -d "$HOME/obsolete-victim" ]
 }
 
+make_extension_dir() {
+    local ext_root="$1" dir_name="$2" publisher="$3" name="$4" version="$5"
+    mkdir -p "$ext_root/$dir_name"
+    printf '{"publisher":"%s","name":"%s","version":"%s"}\n' \
+        "$publisher" "$name" "$version" > "$ext_root/$dir_name/package.json"
+}
+
+write_extension_registry() {
+    local registry="$1"
+    shift
+    mkdir -p "$(dirname "$registry")"
+    {
+        printf '['
+        local first=true dir
+        for dir in "$@"; do
+            [[ "$first" == "true" ]] || printf ','
+            first=false
+            printf '{"relativeLocation":"%s","location":{"path":"/x/%s","scheme":"file"}}' "$dir" "$dir"
+        done
+        printf ']\n'
+    } > "$registry"
+}
+
+run_editor_extension_cleanup() {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "CLEAN:$1"; }
+note_activity() { :; }
+mole_defer_cleanup_family() { echo "DEFER:$1"; }
+clean_editor_obsolete_extensions
+EOF
+}
+
+@test "a directory named by .obsolete is not offered twice (#1461)" {
+    rm -rf "$HOME/.vscode" "$HOME/.vscode-insiders" "$HOME/.cursor" "$HOME/Library/Application Support/Code"
+    local ext_root="$HOME/.vscode/extensions"
+    make_extension_dir "$ext_root" "pub.ext-1.0.0" "Pub" "ext" "1.0.0"
+    write_extension_registry "$ext_root/extensions.json" "pub.registered-9.9.9"
+    cat > "$ext_root/.obsolete" << 'JSON'
+{
+  "pub.ext-1.0.0": true
+}
+JSON
+    mkdir -p "$HOME/Library/Application Support/Code/User/profiles"
+
+    run_editor_extension_cleanup
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local hits
+    hits=$(printf '%s\n' "$output" | grep -c "CLEAN:$ext_root/pub.ext-1.0.0" || true)
+    [ "$hits" -eq 1 ] || { echo "expected 1 offer, got $hits"; echo "$output"; return 1; }
+    [[ "$output" == *"Obsolete VS Code extension"* ]] || [[ "$output" == *"CLEAN:"* ]]
+}
+
+@test "manual private extensions absent from the registry are preserved (#1461)" {
+    rm -rf "$HOME/.vscode" "$HOME/.vscode-insiders" "$HOME/.cursor" "$HOME/Library/Application Support/Code"
+    local ext_root="$HOME/.vscode/extensions"
+    make_extension_dir "$ext_root" "pub.private-1.0.0" "Pub" "private" "1.0.0"
+    make_extension_dir "$ext_root" "pub.obsolete-0.9.0" "Pub" "obsolete" "0.9.0"
+    write_extension_registry "$ext_root/extensions.json" "pub.registered-9.9.9"
+    cat > "$ext_root/.obsolete" << 'JSON'
+{
+  "pub.obsolete-0.9.0": true
+}
+JSON
+    mkdir -p "$HOME/Library/Application Support/Code/User/profiles"
+
+    run_editor_extension_cleanup
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"CLEAN:$ext_root/pub.obsolete-0.9.0"* ]] || return 1
+    [[ "$output" != *"CLEAN:$ext_root/pub.private-1.0.0"* ]] || return 1
+}
+
 @test "clean_code_editors includes CodeBuddy Extension caches when directory exists" {
     mkdir -p "$HOME/Library/Application Support/CodeBuddyExtension"
 
@@ -1405,6 +1481,7 @@ INNER
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=0 /bin/bash --noprofile --norc << 'INNER'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
+_MOLE_COMPLETE_LSOF_MODE=direct
 pgrep() { return 1; }
 lsof() { return 1; }
 oplog_enabled() { return 1; }
