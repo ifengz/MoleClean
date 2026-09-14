@@ -81,6 +81,41 @@ EOF
     [[ -d "$victim" ]]
 }
 
+@test "safe_remove rebinds identity after a final sink guard" {
+    local victim="$SANDBOX/final-guard-replaced"
+    local original="$SANDBOX/final-guard-original"
+    mkdir -p "$victim"
+    : > "$victim/old.txt"
+
+    run /bin/bash --noprofile --norc <<EOF
+$(prelude)
+_mole_snapshot_path_identity "$victim"
+expected_parent="\$_MOLE_PATH_SNAPSHOT_PARENT"
+expected_parent_id="\$_MOLE_PATH_SNAPSHOT_PARENT_ID"
+expected_target_id="\$_MOLE_PATH_SNAPSHOT_TARGET_ID"
+final_guard() {
+    mv "\$1" "$original"
+    mkdir -p "\$1"
+    : > "\$1/replacement.txt"
+}
+_MOLE_SAFE_REMOVE_FINAL_GUARD=final_guard
+set +e
+safe_remove "$victim" true 1 "" \
+    "\$expected_parent" "\$expected_parent_id" "\$expected_target_id"
+actual_rc=\$?
+set -e
+printf 'RC:%s ORIGINAL:%s REPLACEMENT:%s\n' \
+    "\$actual_rc" "\$(test -f "$original/old.txt" && echo kept || echo missing)" \
+    "\$(test -f "$victim/replacement.txt" && echo kept || echo missing)"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"RC:1 ORIGINAL:kept REPLACEMENT:kept"* ]]
+}
+
 @test "mole_delete trash mode moves the target instead of rm -rf" {
     local victim="$SANDBOX/victim_trash"
     mkdir -p "$victim"
@@ -341,6 +376,17 @@ EOF
     grep -qF "direct:/Applications/Microsoft Word.app:false" "$trace"
     [[ "$(grep -c '^trash:' "$trace" 2> /dev/null || true)" -eq 0 ]] || return 1
     [[ "$(grep -c '^osascript:' "$trace" 2> /dev/null || true)" -eq 0 ]]
+}
+
+@test "mixed-case app suffix still uses the application Trash path" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+_mole_path_is_application_bundle "/Applications/Example.APP"
+_mole_path_requires_direct_trash "/Applications/Example.App"
+EOF
+
+    [ "$status" -eq 0 ]
 }
 
 @test "application Trash falls back to Finder after a direct TCC denial" {
@@ -1162,6 +1208,22 @@ EOF
         return 1
     }
     [[ "$output" != *"UNEXPECTED_RM"* ]]
+}
+
+@test "path identity rejects incomplete metadata without retaining a previous binding" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" SANDBOX="$SANDBOX" /bin/bash <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+mkdir -p "$SANDBOX/artifact with spaces"
+_mole_snapshot_path_identity "$SANDBOX/artifact with spaces"
+[[ -n "$_MOLE_PATH_SNAPSHOT_TARGET_ID" ]] || exit 1
+function /usr/bin/stat { printf '1:2\n'; }
+if _mole_snapshot_path_identity "$SANDBOX/artifact with spaces"; then
+    exit 1
+fi
+[[ -z "$_MOLE_PATH_SNAPSHOT_PARENT" && -z "$_MOLE_PATH_SNAPSHOT_PARENT_ID" && -z "$_MOLE_PATH_SNAPSHOT_TARGET_ID" ]] || exit 1
+EOF
+    [ "$status" -eq 0 ]
 }
 
 @test "mole_delete never binds a replacement installed during identity snapshot" {

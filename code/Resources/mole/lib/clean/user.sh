@@ -55,10 +55,10 @@ clean_trash() {
             local trash_item
             while IFS= read -r -d '' trash_item; do
                 [[ -e "$trash_item" ]] || continue
-                if should_protect_path "$trash_item" 2> /dev/null ||
-                    is_path_whitelisted "$trash_item" 2> /dev/null ||
+                if is_path_whitelisted "$trash_item" 2> /dev/null ||
                     (declare -f holds_compiled_model_cache > /dev/null 2>&1 &&
-                        holds_compiled_model_cache "$trash_item" 2> /dev/null); then
+                        holds_compiled_model_cache "$trash_item" 2> /dev/null) ||
+                    ! validate_path_for_deletion "$trash_item" 2> /dev/null; then
                     continue
                 fi
                 local trash_item_kb
@@ -90,16 +90,26 @@ clean_trash() {
     fi
 
     local cleaned_count=0
+    local skipped_count=0
     while IFS= read -r -d '' item; do
         if safe_remove "$item" true; then
             cleaned_count=$((cleaned_count + 1))
+        else
+            skipped_count=$((skipped_count + 1))
         fi
     done < <(command find "$HOME/.Trash" -mindepth 1 -maxdepth 1 -print0 2> /dev/null || true)
 
     [[ -t 1 ]] && stop_inline_spinner
 
     if [[ $cleaned_count -gt 0 ]]; then
-        echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Trash · emptied, $cleaned_count items"
+        if [[ $skipped_count -gt 0 ]]; then
+            echo -e "  ${YELLOW}${ICON_WARNING}${NC} Trash · removed $cleaned_count items, $skipped_count could not be removed"
+        else
+            echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Trash · emptied, $cleaned_count items"
+        fi
+        note_activity
+    elif [[ $skipped_count -gt 0 ]]; then
+        echo -e "  ${GRAY}${ICON_WARNING}${NC} Trash · $skipped_count items could not be removed"
         note_activity
     fi
 }
@@ -959,7 +969,10 @@ clean_app_caches() {
     # recoverable user documents, not only disposable cache data.
     safe_clean ~/Library/IdentityCaches/* "Identity caches" || true
     safe_clean ~/Library/Suggestions/* "Siri suggestions cache" || true
-    safe_clean ~/Library/Calendars/Calendar\ Cache "Calendar cache" || true
+    # Do not clean ~/Library/Calendars/Calendar Cache*: CalendarAgent keeps this
+    # SQLite index open in the background. Deleting it while the daemon is
+    # running can crash Calendar.app until logout/login (#1508). Apple treats
+    # this as a manual troubleshooting step, not routine cache maintenance.
     safe_clean ~/Library/Application\ Support/AddressBook/Sources/*/Photos.cache "Address Book photo cache" || true
     clean_support_app_data
 
@@ -1487,10 +1500,36 @@ validate_external_volume_target() {
     printf '%s\n' "$resolved"
 }
 
+_mole_external_volume_final_guard() {
+    local target="$1"
+    local previous_guard="${_MOLE_EXTERNAL_VOLUME_PREVIOUS_FINAL_GUARD:-}"
+    if [[ -n "$previous_guard" && "$previous_guard" != "_mole_external_volume_final_guard" ]] &&
+        declare -f "$previous_guard" > /dev/null 2>&1; then
+        "$previous_guard" "$target" || return $?
+    fi
+    _mole_path_matches_identity \
+        "$_MOLE_EXTERNAL_VOLUME_GUARD_PATH" \
+        "$_MOLE_EXTERNAL_VOLUME_GUARD_PARENT" \
+        "$_MOLE_EXTERNAL_VOLUME_GUARD_PARENT_ID" \
+        "$_MOLE_EXTERNAL_VOLUME_GUARD_TARGET_ID"
+}
+
 clean_external_volume_target() {
     local volume="$1"
     [[ -d "$volume" ]] || return 1
     [[ -L "$volume" ]] && return 1
+
+    if ! _mole_snapshot_path_identity "$volume"; then
+        echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}could not bind mounted volume, no changes${NC}"
+        note_activity
+        return 1
+    fi
+    local _MOLE_EXTERNAL_VOLUME_GUARD_PATH="$volume"
+    local _MOLE_EXTERNAL_VOLUME_GUARD_PARENT="$_MOLE_PATH_SNAPSHOT_PARENT"
+    local _MOLE_EXTERNAL_VOLUME_GUARD_PARENT_ID="$_MOLE_PATH_SNAPSHOT_PARENT_ID"
+    local _MOLE_EXTERNAL_VOLUME_GUARD_TARGET_ID="$_MOLE_PATH_SNAPSHOT_TARGET_ID"
+    local _MOLE_EXTERNAL_VOLUME_PREVIOUS_FINAL_GUARD="${_MOLE_SAFE_REMOVE_FINAL_GUARD:-}"
+    local _MOLE_SAFE_REMOVE_FINAL_GUARD="_mole_external_volume_final_guard"
 
     local -a top_level_targets=(
         "$volume/.TemporaryItems"
@@ -1503,10 +1542,54 @@ clean_external_volume_target() {
 
     start_section_spinner "Scanning external volume..."
 
+    # Materialize the complete AppleDouble inventory before any external-volume
+    # mutation. A timed-out find can leave a valid-looking prefix on stdout;
+    # consuming that prefix from process substitution used to delete those rows
+    # and report success even though the scan itself returned 124.
+    local metadata_scan_timeout="${MOLE_EXTERNAL_VOLUME_SCAN_TIMEOUT:-15}"
+    [[ "$metadata_scan_timeout" =~ ^[0-9]+$ ]] || metadata_scan_timeout=15
+    local metadata_scan_file=""
+    if ! metadata_scan_file=$(mktemp_file "external-volume-metadata"); then
+        stop_section_spinner
+        echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}could not prepare scan, no changes${NC}"
+        note_activity
+        return 1
+    fi
+    local metadata_scan_rc=0
+    # Any nonzero find status fails the scan closed, and BSD find returns 1
+    # after a single unreadable directory. The volume metadata trees are
+    # root-owned on ownership-enabled volumes and never hold user AppleDouble
+    # files, so prune them rather than report a healthy volume as failed.
+    run_with_timeout "$metadata_scan_timeout" find -P "$volume" -xdev \
+        \( -path "$volume/.TemporaryItems" -o -path "$volume/.Trashes" \
+        -o -path "$volume/.Spotlight-V100" -o -path "$volume/.fseventsd" \
+        -o -path "$volume/.DocumentRevisions-V100" \) -prune -o \
+        -type f -name "._*" -print0 > "$metadata_scan_file" 2> /dev/null || metadata_scan_rc=$?
+    if [[ $metadata_scan_rc -ne 0 ]]; then
+        : > "$metadata_scan_file" || true
+        stop_section_spinner
+        if [[ $metadata_scan_rc -eq 124 ]]; then
+            echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}scan timed out, no changes${NC}"
+        elif [[ $metadata_scan_rc -ge 128 ]]; then
+            echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}scan interrupted, no changes${NC}"
+        else
+            echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}scan failed, no changes${NC}"
+        fi
+        note_activity
+        _mole_record_clean_cancellation "$metadata_scan_rc"
+        return "$metadata_scan_rc"
+    fi
+
     local target_path
     for target_path in "${top_level_targets[@]}"; do
         [[ -e "$target_path" ]] || continue
         [[ -L "$target_path" ]] && continue
+        if ! _mole_snapshot_path_identity "$target_path"; then
+            continue
+        fi
+        local target_parent="$_MOLE_PATH_SNAPSHOT_PARENT"
+        local target_parent_id="$_MOLE_PATH_SNAPSHOT_PARENT_ID"
+        local target_id="$_MOLE_PATH_SNAPSHOT_TARGET_ID"
         if should_protect_path "$target_path" 2> /dev/null || is_path_whitelisted "$target_path" 2> /dev/null; then
             continue
         fi
@@ -1519,13 +1602,18 @@ clean_external_volume_target() {
         [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
 
         if [[ "$DRY_RUN" == "true" ]]; then
+            if ! _mole_path_matches_identity \
+                "$target_path" "$target_parent" "$target_parent_id" "$target_id"; then
+                continue
+            fi
             if declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
                 record_dry_run_cleanup_target "$target_path" "$size_kb" 1 true || continue
             fi
             found_any=true
             cleaned_count=$((cleaned_count + 1))
             total_size=$((total_size + size_kb))
-        elif safe_remove "$target_path" true > /dev/null 2>&1; then
+        elif safe_remove "$target_path" true "$size_kb" "" \
+            "$target_parent" "$target_parent_id" "$target_id" > /dev/null 2>&1; then
             found_any=true
             cleaned_count=$((cleaned_count + 1))
             total_size=$((total_size + size_kb))
@@ -1533,13 +1621,24 @@ clean_external_volume_target() {
     done
 
     if [[ "$PROTECT_FINDER_METADATA" != "true" ]]; then
-        clean_ds_store_tree "$volume" "${volume_name} volume, .DS_Store"
+        local finder_rc=0
+        clean_ds_store_tree "$volume" "${volume_name} volume, .DS_Store" || finder_rc=$?
+        if [[ $finder_rc -ne 0 ]]; then
+            stop_section_spinner
+            _mole_record_clean_cancellation "$finder_rc"
+            return "$finder_rc"
+        fi
     fi
 
-    local metadata_scan_timeout="${MOLE_EXTERNAL_VOLUME_SCAN_TIMEOUT:-15}"
-    [[ "$metadata_scan_timeout" =~ ^[0-9]+$ ]] || metadata_scan_timeout=15
     while IFS= read -r -d '' metadata_file; do
         [[ -e "$metadata_file" ]] || continue
+        [[ -L "$metadata_file" ]] && continue
+        if ! _mole_snapshot_path_identity "$metadata_file"; then
+            continue
+        fi
+        local metadata_parent="$_MOLE_PATH_SNAPSHOT_PARENT"
+        local metadata_parent_id="$_MOLE_PATH_SNAPSHOT_PARENT_ID"
+        local metadata_id="$_MOLE_PATH_SNAPSHOT_TARGET_ID"
         if should_protect_path "$metadata_file" 2> /dev/null || is_path_whitelisted "$metadata_file" 2> /dev/null; then
             continue
         fi
@@ -1552,18 +1651,23 @@ clean_external_volume_target() {
         [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
 
         if [[ "$DRY_RUN" == "true" ]]; then
+            if ! _mole_path_matches_identity \
+                "$metadata_file" "$metadata_parent" "$metadata_parent_id" "$metadata_id"; then
+                continue
+            fi
             if declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
                 record_dry_run_cleanup_target "$metadata_file" "$size_kb" 1 true || continue
             fi
             found_any=true
             cleaned_count=$((cleaned_count + 1))
             total_size=$((total_size + size_kb))
-        elif safe_remove "$metadata_file" true > /dev/null 2>&1; then
+        elif safe_remove "$metadata_file" true "$size_kb" "" \
+            "$metadata_parent" "$metadata_parent_id" "$metadata_id" > /dev/null 2>&1; then
             found_any=true
             cleaned_count=$((cleaned_count + 1))
             total_size=$((total_size + size_kb))
         fi
-    done < <(run_with_timeout "$metadata_scan_timeout" find -P "$volume" -xdev -type f -name "._*" -print0 2> /dev/null || true)
+    done < "$metadata_scan_file"
 
     stop_section_spinner
 

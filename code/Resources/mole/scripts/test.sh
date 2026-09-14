@@ -21,18 +21,20 @@ fi
 # Never allow the scripted test run to trigger real sudo or Touch ID prompts.
 export MOLE_TEST_NO_AUTH=1
 
-# Tests assert deterministic ANSI escape output. Strip any NO_COLOR the
-# developer has set in their shell so the test color-escape assertions
-# match regardless of the host environment.
+# Tests assert deterministic ANSI escape output. The suite runs without a
+# terminal, so lib/core/base.sh would otherwise drop color; the MOLE_TEST_NO_AUTH
+# export above is what forces it back on. Strip any NO_COLOR the developer has
+# set in their shell, since that still wins over the force, so the color-escape
+# assertions match regardless of the host environment.
 unset NO_COLOR
 
 TEST_SYSTEM_STUB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mole-test-stubs.XXXXXX")"
 TEST_GO_HELPER_DIR=""
 # shellcheck disable=SC2329  # Invoked by trap.
 cleanup_test_stubs() {
-    rm -rf "$TEST_SYSTEM_STUB_DIR"
+    rm -rf "$TEST_SYSTEM_STUB_DIR" # SAFE: exact mktemp-created test stub directory
     if [[ -n "$TEST_GO_HELPER_DIR" ]]; then
-        rm -rf "$TEST_GO_HELPER_DIR"
+        rm -rf "$TEST_GO_HELPER_DIR" # SAFE: exact mktemp-created Go helper directory
     fi
 }
 trap cleanup_test_stubs EXIT
@@ -141,7 +143,7 @@ prepare_go_test_helpers() {
         export MOLE_TEST_ANALYZE_BIN="$TEST_GO_HELPER_DIR/analyze-go"
         export MOLE_TEST_STATUS_BIN="$TEST_GO_HELPER_DIR/status-go"
     else
-        rm -rf "$TEST_GO_HELPER_DIR"
+        rm -rf "$TEST_GO_HELPER_DIR" # SAFE: exact mktemp-created Go helper directory
         TEST_GO_HELPER_DIR=""
     fi
 }

@@ -1,6 +1,6 @@
 ---
 name: bash32-portability-reviewer
-description: Reviews Mole shell and Bats diffs against the current macOS Bash 3.2, errexit, timeout, TTY, BSD-tool, and CI-runner pitfalls recorded in AGENTS.md. Use after changes under mole, install.sh, bin/**, lib/**, scripts/**, or tests/*.bats.
+description: Reviews Mole shell and Bats diffs against the current macOS Bash 3.2, errexit, timeout, TTY, BSD-tool, and CI-runner pitfalls recorded in .claude/skills/bugs/references/shell-and-test-pitfalls.md. Use after changes under mole, install.sh, bin/**, lib/**, scripts/**, or tests/*.bats.
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -11,7 +11,7 @@ before every review. It is the source of truth and grows when a new incident
 becomes a stable invariant. Do not rely on a fixed count or a copied historical
 list in this profile.
 
-You read diffs, production context, and tests. You never edit files.
+You read diffs, production context, and tests.
 
 ## Review method
 

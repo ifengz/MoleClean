@@ -34,7 +34,7 @@ setup() {
 
 @test "mo_spinner_chars returns default sequence" {
     result="$(HOME="$HOME" /bin/bash --noprofile --norc -c "source '$PROJECT_ROOT/lib/core/common.sh'; mo_spinner_chars")"
-    [ "$result" = "|/-\\" ]
+    [ "$result" = $'⠋\n⠙\n⠹\n⠸\n⠼\n⠴\n⠦\n⠧\n⠇\n⠏' ]
 }
 
 @test "detect_architecture maps current CPU to friendly label" {
@@ -244,6 +244,19 @@ EOF
     path="$HOME/Library/Containers/com.apple.wallpaper.agent/Data/Library/Caches/rebuildable.bin"
     result=$(HOME="$HOME" TARGET_PATH="$path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo protected || echo unprotected')
     [ "$result" = "unprotected" ]
+}
+
+@test "should_protect_path protects Calendar data and cache paths (#1508)" {
+    local path result
+    for path in \
+        "$HOME/Library/Calendars" \
+        "$HOME/Library/Calendars/Calendar Cache" \
+        "$HOME/Library/Calendars/Calendar Cache-shm" \
+        "$HOME/Library/Calendars/Calendar Cache-wal" \
+        "$HOME/Library/Calendars/01234567-89AB-CDEF-0123-456789ABCDEF"; do
+        result=$(HOME="$HOME" TARGET_PATH="$path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo protected || echo unprotected')
+        [ "$result" = "protected" ] || return 1
+    done
 }
 
 @test "xcode_build_tooling_process_state recognizes command-line build owners" {
@@ -721,7 +734,7 @@ EOF
 }
 
 @test "start_inline_spinner ignores PATH-provided sleep in TTY mode" {
-    if ! /usr/bin/script -q /dev/null /bin/true > /dev/null 2>&1; then
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
         skip "script cannot allocate a TTY in this environment"
     fi
 
@@ -744,6 +757,26 @@ EOF
     [ ! -f "$marker" ]
 }
 
+@test "start_inline_spinner emits complete UTF-8 frames in C locale" {
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
+        skip "script cannot allocate a TTY in this environment"
+    fi
+
+    local raw="$HOME/spinner-c-locale.raw"
+    # shellcheck disable=SC2016  # inner bash expands these from its environment
+    PROJECT_ROOT="$PROJECT_ROOT" HOME="$HOME" TERM=xterm-256color LC_ALL=C \
+        /usr/bin/script -q "$raw" /bin/bash --noprofile --norc -c \
+        'source "$PROJECT_ROOT/lib/core/common.sh"; start_inline_spinner "Testing..."; /bin/sleep 0.95; stop_inline_spinner' \
+        < /dev/null > /dev/null 2>&1
+
+    /usr/bin/iconv -f UTF-8 -t UTF-8 "$raw" > /dev/null || return 1
+    raw_content="$(cat "$raw")"
+    # The old byte-slicing implementation emitted invalid UTF-8 here. Do not
+    # require a full animation cycle: CI startup time can consume part of this
+    # bounded capture even though the spinner itself is healthy.
+    [[ "$raw_content" == *"⠋"* ]]
+}
+
 @test "update_inline_spinner_message returns 1 without an active spinner" {
     run /bin/bash --noprofile --norc -c \
         "source '$PROJECT_ROOT/lib/core/common.sh'; update_inline_spinner_message 'New text'"
@@ -751,7 +784,7 @@ EOF
 }
 
 @test "update_inline_spinner_message swaps a live TTY spinner's text in place" {
-    if ! /usr/bin/script -q /dev/null /bin/true > /dev/null 2>&1; then
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
         skip "script cannot allocate a TTY in this environment"
     fi
 
@@ -782,7 +815,7 @@ EOF
 }
 
 @test "update_progress_if_needed updates spinner text without restarting it" {
-    if ! /usr/bin/script -q /dev/null /bin/true > /dev/null 2>&1; then
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
         skip "script cannot allocate a TTY in this environment"
     fi
 
@@ -857,6 +890,23 @@ EOF
 
     run /bin/bash -c "export MOLE_BASE_LOADED=1; source '$PROJECT_ROOT/lib/core/ui.sh'; printf 'gg' | read_key"
     [ "$output" = "TOP" ]
+}
+
+@test "read_key decodes physical paging and home keys in navigation and text modes" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash <<'EOF'
+export MOLE_BASE_LOADED=1
+source "$PROJECT_ROOT/lib/core/ui.sh"
+for mode in 0 1; do
+    export MOLE_READ_KEY_FORCE_CHAR=$mode
+    for pair in '5~ LEFT' '6~ RIGHT' 'H TOP' 'F BOTTOM' '1~ TOP' '4~ BOTTOM' '7~ TOP' '8~ BOTTOM'; do
+        sequence=${pair%% *}
+        expected=${pair#* }
+        actual=$(printf '\033[%s' "$sequence" | read_key)
+        [[ "$actual" == "$expected" ]] || exit 1
+    done
+done
+EOF
+    [ "$status" -eq 0 ]
 }
 
 @test "read_key respects MOLE_READ_KEY_FORCE_CHAR" {

@@ -144,6 +144,21 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "validate_path_for_deletion allows protected input-method names in Trash (#1517)" {
+    mkdir -p "$HOME/.Trash"
+    touch "$HOME/.Trash/com.sogou.inputmethod.sogou.plist"
+    touch "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist"
+
+    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$HOME/.Trash/com.sogou.inputmethod.sogou.plist'"
+    [ "$status" -eq 0 ]
+
+    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$HOME/.Trash/com.tencent.inputmethod.QQInput.plist'"
+    [ "$status" -eq 0 ]
+
+    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$HOME/Library/Preferences/com.sogou.inputmethod.sogou.plist'"
+    [ "$status" -eq 1 ]
+}
+
 @test "validate_path_for_deletion rejects temp roots while allowing their children" {
     run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '/private/tmp'"
     [ "$status" -eq 1 ]
@@ -1166,6 +1181,22 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "should_protect_path allows only the measured WeChat container cache leaves" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+wechat="$HOME/Library/Containers/com.tencent.xinWeChat/Data"
+! should_protect_path "$wechat/Documents/app_data/log/wechat.log"
+! should_protect_path "$wechat/.wxapplet/WMPF/cache.bin"
+should_protect_path "$wechat/Documents/xwechat_files/account/db_storage/message.db"
+should_protect_path "$wechat/Documents/app_data/radium/users/account/state.db"
+should_protect_path "$wechat/Documents/app_data/log"
+should_protect_path "$wechat/.wxapplet/WMPF"
+EOF
+
+    [ "$status" -eq 0 ]
+}
+
 @test "is_endpoint_security_cache_path matches only EDR agent var/folders caches" {
     run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -1941,23 +1972,21 @@ SCRIPT
     run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'SCRIPT'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
-# `remaining` is `deadline - SECONDS`, and SECONDS keeps ticking in real time.
-# Re-pinning the clock per call narrowed the race but did not close it: with a
-# deadline one second out, a command-substitution fork that straddles a second
-# boundary leaves remaining at zero, and the helper returns 124 with no output.
-# That is what reddened this case twice on loaded runners. A five-second window
-# gives each fork five times the slack while every assertion below keeps its
-# exact meaning: 30.5 and 08.5 still clamp because their whole parts are >= 5,
-# 0.5 still passes through because its whole part is not, and 0 still reports
-# the remaining window.
+# This case verifies the helper's clamp arithmetic, not command-substitution
+# scheduling. Invoke it directly after resetting SECONDS so a loaded runner
+# cannot spend part of the remaining window waiting to fork (#1791).
 SECONDS=100
-printf 'CLAMPED=%s\n' "$(_mole_timeout_with_deadline 30.5 105)"
+printf 'CLAMPED='
+_mole_timeout_with_deadline 30.5 105
 SECONDS=100
-printf 'SHORT=%s\n' "$(_mole_timeout_with_deadline 0.5 105)"
+printf 'SHORT='
+_mole_timeout_with_deadline 0.5 105
 SECONDS=100
-printf 'ZERO=%s\n' "$(_mole_timeout_with_deadline 0 105)"
+printf 'ZERO='
+_mole_timeout_with_deadline 0 105
 SECONDS=100
-printf 'LEADING=%s\n' "$(_mole_timeout_with_deadline 08.5 105)"
+printf 'LEADING='
+_mole_timeout_with_deadline 08.5 105
 SCRIPT
 
     [ "$status" -eq 0 ] || return 1

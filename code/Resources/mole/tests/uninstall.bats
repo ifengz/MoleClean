@@ -649,6 +649,67 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "live same-bundle guard finds mixed-case siblings but ignores nested and unrelated bundles" {
+    local app_root="$HOME/live-mixed-case-apps"
+    mkdir -p "$app_root/Selected.app/Contents" \
+        "$app_root/Unrelated.App/Contents"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" APP_ROOT="$app_root" \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+pkg_receipt_nonstandard_app_paths() { :; }
+
+write_bundle_id() {
+    local path="$1"
+    local bundle_id="$2"
+    mkdir -p "$path/Contents"
+    printf '%s\n' \
+        '<?xml version="1.0" encoding="UTF-8"?>' \
+        '<plist version="1.0"><dict>' \
+        "<key>CFBundleIdentifier</key><string>$bundle_id</string>" \
+        '</dict></plist>' \
+        > "$path/Contents/Info.plist"
+}
+
+write_bundle_id "$APP_ROOT/Selected.app" "com.example.live-mixed"
+write_bundle_id "$APP_ROOT/Unrelated.App" "com.example.unrelated"
+selected_apps=("0|$APP_ROOT/Selected.app|Selected|com.example.live-mixed|0|Never")
+_MOLE_UNINSTALL_LIVE_APP_ROOTS=("$APP_ROOT")
+_MOLE_UNINSTALL_LIVE_VOLUMES_ROOT="$HOME/no-volumes"
+
+# A case-variant app with another id must not block the selected app.
+if uninstall_live_bundle_has_other_install \
+    "com.example.live-mixed" "$APP_ROOT/Selected.app"; then
+    echo "WRONG: unrelated app reported as a sibling"
+    exit 1
+fi
+[[ ${#_MOLE_UNINSTALL_LIVE_SIBLING_PATHS[@]} -eq 0 ]] || exit 1
+
+# A nested helper belongs to Container.APP and is not another installation.
+write_bundle_id "$APP_ROOT/Container.APP/Nested.app" "com.example.live-mixed"
+if uninstall_live_bundle_has_other_install \
+    "com.example.live-mixed" "$APP_ROOT/Selected.app"; then
+    echo "WRONG: nested app reported as a sibling"
+    exit 1
+fi
+[[ ${#_MOLE_UNINSTALL_LIVE_SIBLING_PATHS[@]} -eq 0 ]] || exit 1
+
+# A top-level surviving .APP with the same id must trip the destructive guard.
+write_bundle_id "$APP_ROOT/Survivor.APP" "com.example.live-mixed"
+uninstall_live_bundle_has_other_install \
+    "com.example.live-mixed" "$APP_ROOT/Selected.app"
+[[ ${#_MOLE_UNINSTALL_LIVE_SIBLING_PATHS[@]} -eq 1 ]] || exit 1
+[[ "${_MOLE_UNINSTALL_LIVE_SIBLING_PATHS[0]}" == "$APP_ROOT/Survivor.APP" ]]
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+}
+
 @test "live same-bundle scan accepts dot-app text in a volume ancestor" {
     local app_root="$HOME/Backup.app-data/Applications"
     mkdir -p "$app_root/Survivor.app/Contents" "$HOME/Selected.app"
@@ -2411,6 +2472,108 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# A bundle whose folder name is not its product name reaches the user as an
+# unrecognizable string: #1520 reported almost uninstalling CapCut because Mole
+# listed it as "VideoFusion-macOS" while Finder showed the Chinese name. The
+# name Finder shows comes from Contents/Resources/<lang>.lproj/InfoPlist.strings.
+_write_display_name_fixture() {
+    local app_path="$1" dev_region="$2" base_name="$3"
+    shift 3
+
+    mkdir -p "$app_path/Contents/Resources"
+    cat > "$app_path/Contents/Info.plist" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.example.fixture</string>
+<key>CFBundleDevelopmentRegion</key><string>$dev_region</string>
+<key>CFBundleDisplayName</key><string>$base_name</string>
+<key>CFBundleName</key><string>$base_name</string>
+</dict></plist>
+PLIST
+
+    local spec lproj value
+    for spec in "$@"; do
+        lproj="${spec%%=*}"
+        value="${spec#*=}"
+        mkdir -p "$app_path/Contents/Resources/$lproj.lproj"
+        if [[ "$value" != "-" ]]; then
+            printf '"CFBundleDisplayName" = "%s";\n' "$value" \
+                > "$app_path/Contents/Resources/$lproj.lproj/InfoPlist.strings"
+        fi
+    done
+}
+
+_run_display_name_case() {
+    local languages="$1" app_path="$2" app_name="$3"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" LANGS="$languages" \
+        APP_PATH="$app_path" APP_NAME="$app_name" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+# mdls only ever reports the on-disk file name for an app bundle, which is the
+# string this behavior exists to replace. Stub it so the case cannot pass by
+# accidentally agreeing with Spotlight.
+run_with_timeout() {
+    shift
+    "$@"
+}
+mdls() { printf '%s\n' "$(basename "$APP_PATH")"; }
+
+for _fn in _uninstall_lproj_candidates _uninstall_localized_bundle_name uninstall_resolve_display_name; do
+    eval "$(sed -n "/^${_fn}()/,/^}/p" "$PROJECT_ROOT/bin/uninstall.sh")"
+done
+
+MOLE_UNINSTALL_USER_LC_ALL=""
+MOLE_UNINSTALL_USER_LANG=""
+MOLE_UNINSTALL_INLINE_MDLS_DISPLAY_TIMEOUT_SEC=3
+MOLE_UNINSTALL_PREFERRED_LANGS="$LANGS"
+
+uninstall_resolve_display_name "$APP_PATH" "$APP_NAME"
+EOF
+}
+
+@test "uninstall_resolve_display_name uses the bundle's localized name for the user's language (#1520)" {
+    local app_path="$HOME/Applications/VideoFusion-macOS.app"
+    _write_display_name_fixture "$app_path" "en" "VideoFusion-macOS" \
+        "en=VideoFusion" "zh-Hans=剪映专业版"
+
+    _run_display_name_case "$(printf 'zh-Hans-CN\nen-CN')" "$app_path" "VideoFusion-macOS.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "剪映专业版" ] || { echo "$output"; return 1; }
+
+    _run_display_name_case "$(printf 'en-CN\nzh-Hans-CN')" "$app_path" "VideoFusion-macOS.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "VideoFusion" ] || { echo "$output"; return 1; }
+}
+
+# The stop condition matters as much as the lookup. MiaoYan.app ships a Chinese
+# override and no English one, so a search that kept walking the preference list
+# would show a Chinese name to a user who asked for English.
+@test "uninstall_resolve_display_name never falls through to an unrequested language (#1520)" {
+    local app_path="$HOME/Applications/MiaoYan.app"
+    _write_display_name_fixture "$app_path" "en" "MiaoYan" "Base=-" "zh-Hans=妙言"
+
+    _run_display_name_case "$(printf 'en-CN\nzh-Hans-CN')" "$app_path" "MiaoYan.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "MiaoYan" ] || { echo "$output"; return 1; }
+
+    _run_display_name_case "$(printf 'zh-Hans-CN\nen-CN')" "$app_path" "MiaoYan.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "妙言" ] || { echo "$output"; return 1; }
+}
+
+@test "uninstall_resolve_display_name keeps the unlocalized name without a language list (#1520)" {
+    local app_path="$HOME/Applications/NoPrefs.app"
+    _write_display_name_fixture "$app_path" "en" "NoPrefs Base" "zh-Hans=中文名"
+
+    _run_display_name_case "" "$app_path" "NoPrefs.app"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$output" = "NoPrefs Base" ] || { echo "$output"; return 1; }
+}
+
 @test "uninstall_resolve_display_name keeps versioned app names when metadata is generic" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -2436,7 +2599,10 @@ function plutil() {
 MOLE_UNINSTALL_USER_LC_ALL=""
 MOLE_UNINSTALL_USER_LANG=""
 
-eval "$(sed -n '/^uninstall_resolve_display_name()/,/^}/p' "$PROJECT_ROOT/bin/uninstall.sh")"
+for _fn in _uninstall_lproj_candidates _uninstall_localized_bundle_name uninstall_resolve_display_name; do
+    eval "$(sed -n "/^${_fn}()/,/^}/p" "$PROJECT_ROOT/bin/uninstall.sh")"
+done
+MOLE_UNINSTALL_PREFERRED_LANGS="${MOLE_UNINSTALL_PREFERRED_LANGS:-}"
 
 app_path="$HOME/Applications/Xcode 16.4.app"
 mkdir -p "$app_path/Contents"
@@ -2502,31 +2668,23 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-@test "refresh_launch_services_after_uninstall falls back after timeout" {
+@test "refresh_launch_services_after_uninstall compacts without forcing a domain re-registration" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
 
-log_file="$HOME/lsregister-timeout.log"
+test_home="$HOME/launchservices-refresh-home"
+mkdir -p "$test_home"
+log_file="$test_home/lsregister-calls.log"
 : > "$log_file"
-call_index=0
 
 get_lsregister_path() { echo "/bin/echo"; }
-debug_log() { echo "DEBUG:$*" >> "$log_file"; }
 run_with_timeout() {
     local duration="$1"
     shift
-    call_index=$((call_index + 1))
-    echo "CALL${call_index}:$duration:$*" >> "$log_file"
-
-    if [[ "$call_index" -eq 2 ]]; then
-        return 124
-    fi
-    if [[ "$call_index" -eq 3 ]]; then
-        return 124
-    fi
-    return 0
+    echo "CALL:$duration:$*" >> "$log_file"
+    return 124
 }
 
 if refresh_launch_services_after_uninstall; then
@@ -2540,9 +2698,40 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"RESULT:ok"* ]] || return 1
-    [[ "$output" == *"CALL2:15:/bin/echo -r -f -domain local -domain user -domain system"* ]] || return 1
-    [[ "$output" == *"CALL3:10:/bin/echo -r -f -domain local -domain user"* ]] || return 1
-    [[ "$output" == *"DEBUG:LaunchServices rebuild timed out, trying lighter version"* ]]
+    [[ "$output" == *"CALL:10:/bin/echo -gc"* ]] || return 1
+    [[ "$output" != *" -r "* ]] || return 1
+    [[ "$output" != *" -f "* ]] || return 1
+    [[ "$output" != *" -domain "* ]] || return 1
+    [ "$(printf '%s\n' "$output" | grep -c '^CALL:')" -eq 1 ] || return 1
+}
+
+@test "unregister_app_bundle accepts mixed-case app suffixes only in real mode" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+
+test_home="$HOME/launchservices-unregister-home"
+mkdir -p "$test_home/Upper.APP" "$test_home/Plain.bundle"
+log_file="$test_home/lsregister-calls.log"
+: > "$log_file"
+
+get_lsregister_path() { echo "/bin/echo"; }
+run_with_timeout() {
+    local duration="$1"
+    shift
+    echo "CALL:$duration:$*" >> "$log_file"
+}
+
+MOLE_DRY_RUN=0 unregister_app_bundle "$test_home/Upper.APP"
+MOLE_DRY_RUN=0 unregister_app_bundle "$test_home/Plain.bundle"
+MOLE_DRY_RUN=1 unregister_app_bundle "$test_home/Upper.APP"
+cat "$log_file"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"CALL:5:/bin/echo -u $HOME/launchservices-unregister-home/Upper.APP"* ]] || return 1
+    [ "$(printf '%s\n' "$output" | grep -c '^CALL:')" -eq 1 ]
 }
 
 @test "remove_mole deletes manual binaries and caches" {
@@ -2687,6 +2876,26 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"count=1"* ]] || return 1
     [[ "$output" == *"Test Application"* ]]
+}
+
+@test "match_apps_by_name prefers an exact mixed-case bundle basename" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+selected_apps=()
+apps_data=(
+	"1000|$HOME/Applications/Foo.APP|Different Display Name|com.example.Foo|1 MB|1000000|1024"
+	"1001|$HOME/Applications/Foo Bar.app|Foo Bar|com.example.FooBar|1 MB|1000001|1024"
+)
+source "$PROJECT_ROOT/tests/test_match_apps_helper.sh"
+match_apps_by_name "Foo"
+echo "count=${#selected_apps[@]}"
+echo "match=${selected_apps[0]}"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"count=1"* ]] || return 1
+    [[ "$output" == *"/Foo.APP|"* ]] || return 1
+    [[ "$output" != *"/Foo Bar.app|"* ]]
 }
 
 @test "match_apps_by_name warns on no match" {
@@ -3167,6 +3376,62 @@ INNER
 
     rm -f "$first_cache"
     [ "$status" -eq 0 ]
+}
+
+@test "completed uninstall suppresses dead-terminal countdown read errors (#1503)" {
+    local apps_cache
+    apps_cache="$(mktemp "${BATS_TEST_TMPDIR:-$BATS_RUN_TMPDIR:-$HOME}/tmp-1503-countdown.XXXXXX")"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" APPS_CACHE_FILE="$apps_cache" \
+        /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+
+log_operation_session_start() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+clear_screen() { :; }
+start_uninstall_interactive_screen() { :; }
+stop_uninstall_interactive_screen() { :; }
+scan_applications() { printf '%s\n' "$APPS_CACHE_FILE"; }
+load_applications() { :; }
+select_apps_for_uninstall() {
+    selected_apps=("0|$HOME/Applications/TestApp.app|TestApp|com.example.TestApp|1KB|Today|1")
+}
+batch_uninstall_applications() { :; }
+uninstall_app_inventory_fingerprint() { printf 'stable\n'; }
+uninstall_normalize_size_display() { printf '%s\n' "$1"; }
+uninstall_normalize_last_used_display() { printf '%s\n' "$1"; }
+get_display_width() { printf '%s\n' "${#1}"; }
+truncate_by_display_width() { printf '%s\n' "$1"; }
+mole_tty_is_foreground() { return 0; }
+drain_pending_input() { :; }
+read() {
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == -t || "$arg" == -t* ]]; then
+            printf 'read error: 0: Input/output error\n' >&2
+            return 1
+        fi
+    done
+    builtin read "$@"
+}
+
+eval "$(sed -n '/^main()/,/main \"\$@\"/p' "$PROJECT_ROOT/bin/uninstall.sh" | sed '$d')"
+main > "$HOME/countdown.out" 2> "$HOME/countdown.err"
+
+[[ "$(cat "$HOME/countdown.err")" != *'Input/output error'* ]] || {
+    cat "$HOME/countdown.err" >&2
+    exit 1
+}
+[[ "$(grep -o 'Press Enter to return to the app list' "$HOME/countdown.out" | wc -l | tr -d ' ')" -eq 5 ]]
+INNER
+
+    rm -f "$apps_cache"
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
 }
 
 @test "inventory cache reuse accepts removals only and rejects stale changes (#1315)" {

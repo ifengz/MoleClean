@@ -1377,9 +1377,12 @@ EOF
     [[ "$output" != *"already clean"* ]]
 }
 
-@test "clean_xcode_xctest_devices targets only exact XCTestDevices directory" {
+@test "clean_xcode_xctest_devices targets each clone entry, not the root" {
     local developer_root="$HOME/Library/Developer"
-    mkdir -p "$developer_root/XCTestDevices" "$developer_root/XCTestDevices-old"
+    local xctest_root="$developer_root/XCTestDevices"
+    mkdir -p "$xctest_root/11111111-2222-3333-4444-555555555555" \
+        "$xctest_root/66666666-7777-8888-9999-000000000000" \
+        "$developer_root/XCTestDevices-old"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -1388,12 +1391,23 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 note_activity() { :; }
 pgrep() { return 1; }
 _coresimulator_booted_device_state() { return 1; }
-safe_clean() { printf 'SAFE:%s|%s\n' "$1" "$2"; }
+safe_clean() { for target in "$@"; do printf 'SAFE:%s\n' "$target"; done; }
 clean_xcode_xctest_devices
 EOF
 
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SAFE:$developer_root/XCTestDevices|Xcode XCTestDevices test data"* ]] || return 1
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"SAFE:$HOME/Library/Developer/XCTestDevices/11111111-2222-3333-4444-555555555555"* ]] || return 1
+    [[ "$output" == *"SAFE:$HOME/Library/Developer/XCTestDevices/66666666-7777-8888-9999-000000000000"* ]] || return 1
+    # The root itself is never a deletion target: it stays for Xcode to
+    # recreate clones in, and a root-sized item would outgrow the per-item
+    # removal budget.
+    if printf '%s\n' "$output" | command grep -qx "SAFE:$HOME/Library/Developer/XCTestDevices"; then
+        echo "WRONG: root passed as target"
+        return 1
+    fi
     [[ "$output" != *"XCTestDevices-old"* ]]
 }
 
@@ -1469,6 +1483,38 @@ EOF
     }
     [[ "$output" != *"Xcode XCTestDevices · stopped"* ]] || return 1
     [[ "$output" != *"UNEXPECTED_REMOVE"* ]]
+}
+
+@test "clean_xcode_xctest_devices removal budget applies per clone entry" {
+    local xctest_root="$HOME/PerEntryXCTestDevices"
+    mkdir -p "$xctest_root/11111111-2222-3333-4444-555555555555" \
+        "$xctest_root/66666666-7777-8888-9999-000000000000"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
+        MOLE_XCODE_XCTEST_DEVICES_DIR="$xctest_root" MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+DRY_RUN=false
+note_activity() { :; }
+pgrep() { return 1; }
+_coresimulator_booted_device_state() { return 1; }
+# One sink call per clone: a root-sized single item outgrows the per-item
+# removal budget after deleting only part of it.
+safe_remove() { printf 'REMOVE:%s\n' "$1"; return 0; }
+clean_xcode_xctest_devices
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"REMOVE:$HOME/PerEntryXCTestDevices/11111111-2222-3333-4444-555555555555"* ]] || return 1
+    [[ "$output" == *"REMOVE:$HOME/PerEntryXCTestDevices/66666666-7777-8888-9999-000000000000"* ]] || return 1
+    if printf '%s\n' "$output" | command grep -qx "REMOVE:$HOME/PerEntryXCTestDevices"; then
+        echo "WRONG: root passed as one removal item"
+        return 1
+    fi
 }
 
 @test "clean_xcode_xctest_devices dry-run keeps XCTestDevices directory" {
@@ -1835,249 +1881,6 @@ EOF
     [[ "$output" != *"$HOME/.claude/shell-snapshots"* ]]
 }
 
-@test "clean_xcode_simulator_runtime_volumes shows scan progress and skips sizing in-use volumes" {
-    local volumes_root="$HOME/sim-volumes"
-    local cryptex_root="$HOME/sim-cryptex"
-    mkdir -p "$volumes_root/in-use-runtime" "$volumes_root/unused-runtime"
-    mkdir -p "$cryptex_root"
-
-    # The "scanning N entries" line is deliberately gated behind MO_DEBUG (the
-    # spinner carries the feedback otherwise), so this case has to ask for it.
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MO_DEBUG=1 MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT="$volumes_root" MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT="$cryptex_root" /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/dev.sh"
-
-size_log="$HOME/size-calls.log"
-: > "$size_log"
-DRY_RUN=false
-
-note_activity() { :; }
-has_sudo_session() { return 0; }
-is_path_whitelisted() { return 1; }
-should_protect_path() { return 1; }
-_sim_runtime_mount_points() {
-    printf '%s\n' "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/in-use-runtime"
-}
-_sim_runtime_size_kb() {
-    local target_path="$1"
-    echo "$target_path" >> "$size_log"
-    echo "1"
-}
-safe_sudo_remove() {
-    local target_path="$1"
-    echo "REMOVE:$target_path"
-    return 0
-}
-
-clean_xcode_simulator_runtime_volumes
-echo "SIZE_LOG_START"
-cat "$size_log"
-EOF
-
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Xcode runtime volumes · scanning 2 entries"* ]] || return 1
-    # 16a8bcaf consolidated the per-stage "cleaning N unused" line into one final
-    # result message; assert the line that survived.
-    [[ "$output" == *"Xcode runtime volumes · removed 1 ("* ]] || return 1
-    [[ "$output" == *"REMOVE:$volumes_root/unused-runtime"* ]] || return 1
-    [[ "$output" == *"$volumes_root/unused-runtime"* ]] || return 1
-    [[ "$output" != *"$volumes_root/in-use-runtime"* ]]
-}
-
-@test "clean_xcode_simulator_runtime_volumes dry-run does not size mounted runtimes" {
-    local volumes_root="$HOME/sim-volumes-dry"
-    local cryptex_root="$HOME/sim-cryptex-dry"
-    mkdir -p "$volumes_root/in-use-runtime" "$volumes_root/unused-runtime" "$cryptex_root"
-
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
-        MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT="$volumes_root" \
-        MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT="$cryptex_root" \
-        /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/dev.sh"
-
-size_log="$HOME/dry-size-calls.log"
-: > "$size_log"
-DRY_RUN=true
-
-note_activity() { :; }
-is_path_whitelisted() { return 1; }
-should_protect_path() { return 1; }
-record_dry_run_cleanup_target() { return 0; }
-_sim_runtime_mount_points() {
-    printf '%s\n' "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/in-use-runtime"
-}
-_sim_runtime_size_kb() {
-    printf '%s\n' "$1" >> "$size_log"
-    echo "1024"
-}
-
-clean_xcode_simulator_runtime_volumes
-printf 'SIZE_CALLS=%s\n' "$(wc -l < "$size_log" | tr -d ' ')"
-cat "$size_log"
-EOF
-
-    [ "$status" -eq 0 ] || {
-        echo "$output"
-        return 1
-    }
-    [[ "$output" == *"SIZE_CALLS=1"* ]] || return 1
-    [[ "$output" == *"$volumes_root/unused-runtime"* ]] || return 1
-    [[ "$output" == *"1 in use"* ]] || return 1
-    [[ "$output" == *"in-use not scanned"* ]] || return 1
-}
-
-@test "clean_xcode_simulator_runtime_volumes deletes nothing when mount enumeration fails" {
-    local volumes_root="$HOME/sim-volumes"
-    mkdir -p "$volumes_root/runtime-a" "$volumes_root/runtime-b"
-
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT="$volumes_root" MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT="$HOME/none" /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/dev.sh"
-
-DRY_RUN=false
-note_activity() { :; }
-has_sudo_session() { return 0; }
-is_path_whitelisted() { return 1; }
-should_protect_path() { return 1; }
-# mount failed: no lines. Without the guard every runtime is UNUSED and deleted.
-_sim_runtime_mount_points() { printf ''; }
-_sim_runtime_size_kb() { echo "1"; }
-safe_sudo_remove() { echo "REMOVE:$1"; return 0; }
-
-clean_xcode_simulator_runtime_volumes
-
-# Positive control. The guard makes this path print nothing at all, so "no
-# REMOVE line" alone cannot tell a working guard from a run that never reached
-# the deletion branch. Same fixture, this time with mounts enumerable.
-echo "CONTROL"
-_sim_runtime_mount_points() { printf '%s\n' "/"; }
-clean_xcode_simulator_runtime_volumes
-EOF
-
-    [ "$status" -eq 0 ] || return 1
-    guarded="${output%%CONTROL*}"
-    control="${output#*CONTROL}"
-    [[ "$guarded" != *"REMOVE:"* ]] || {
-        echo "deleted a volume despite unknown mount state"
-        return 1
-    }
-    [[ "$control" == *"REMOVE:"* ]] || {
-        echo "control run removed nothing, so the guarded run proves nothing"
-        return 1
-    }
-}
-
-@test "clean_xcode_simulator_runtime_volumes rechecks mounts after sizing" {
-    local volumes_root="$HOME/sim-volumes-race"
-    mkdir -p "$volumes_root/runtime-a"
-
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT="$volumes_root" MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT="$HOME/none" /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/dev.sh"
-DRY_RUN=false
-note_activity() { :; }
-has_sudo_session() { return 0; }
-is_path_whitelisted() { return 1; }
-should_protect_path() { return 1; }
-_sim_runtime_mount_points() {
-    printf 'probe\n' >> "$HOME/mount-probes"
-    local round
-    round=$(wc -l < "$HOME/mount-probes" | tr -d ' ')
-    if [[ $round -eq 1 ]]; then
-        printf '%s\n' "/"
-    else
-        printf '%s\n' "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/runtime-a"
-    fi
-}
-_sim_runtime_size_kb() { echo 1; }
-safe_sudo_remove() { echo "UNEXPECTED_REMOVE:$1"; return 0; }
-
-rm -f "$HOME/mount-probes"
-clean_xcode_simulator_runtime_volumes
-[[ -d "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/runtime-a" ]] || exit 1
-EOF
-
-    [ "$status" -eq 0 ] || {
-        echo "$output"
-        return 1
-    }
-    [[ "$output" == *"Xcode runtime volumes · stopped (runtime became mounted)"* ]] || return 1
-    [[ "$output" != *"UNEXPECTED_REMOVE"* ]]
-}
-
-@test "clean_xcode_simulator_runtime_volumes reports deletion failures" {
-    local volumes_root="$HOME/sim-volumes-failed"
-    mkdir -p "$volumes_root/runtime-a"
-
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT="$volumes_root" MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT="$HOME/none" /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/dev.sh"
-DRY_RUN=false
-note_activity() { :; }
-has_sudo_session() { return 0; }
-is_path_whitelisted() { return 1; }
-should_protect_path() { return 1; }
-_sim_runtime_mount_points() { printf '%s\n' "/"; }
-_sim_runtime_size_kb() { echo 1; }
-safe_sudo_remove() { return 1; }
-clean_xcode_simulator_runtime_volumes
-[[ -d "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/runtime-a" ]] || exit 1
-EOF
-
-    [ "$status" -eq 0 ] || {
-        echo "$output"
-        return 1
-    }
-    [[ "$output" == *"Xcode runtime volumes · could not remove 1 entries"* ]] || return 1
-    [[ "$output" != *"already clean"* ]]
-}
-
-@test "clean_xcode_simulator_runtime_volumes reports a mount stop after an earlier failure" {
-    local volumes_root="$HOME/sim-volumes-failure-stop"
-    mkdir -p "$volumes_root/runtime-a" "$volumes_root/runtime-b"
-
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT="$volumes_root" MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT="$HOME/none" /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/dev.sh"
-DRY_RUN=false
-note_activity() { :; }
-has_sudo_session() { return 0; }
-is_path_whitelisted() { return 1; }
-should_protect_path() { return 1; }
-_sim_runtime_mount_points() {
-    printf 'probe\n' >> "$HOME/mount-failure-stop-probes"
-    local round
-    round=$(wc -l < "$HOME/mount-failure-stop-probes" | tr -d ' ')
-    if [[ $round -le 2 ]]; then
-        printf '%s\n' "/"
-    else
-        printf '%s\n' "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/runtime-b"
-    fi
-}
-_sim_runtime_size_kb() { echo 1; }
-safe_sudo_remove() { return 1; }
-
-rm -f "$HOME/mount-failure-stop-probes"
-clean_xcode_simulator_runtime_volumes
-[[ -d "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/runtime-a" ]] || exit 1
-[[ -d "$MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT/runtime-b" ]] || exit 1
-EOF
-
-    [ "$status" -eq 0 ] || {
-        echo "$output"
-        return 1
-    }
-    [[ "$output" == *"Xcode runtime volumes · could not remove 1 entries"* ]] || return 1
-    [[ "$output" == *"Xcode runtime volumes · stopped (runtime became mounted)"* ]]
-}
-
 @test "clean_dev_mobile leaves an idle section when no unavailable simulator exists" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 DRY_RUN=true \
         /bin/bash --noprofile --norc << 'EOF'
@@ -2086,7 +1889,6 @@ source "$PROJECT_ROOT/bin/clean.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 _xcode_safe_clean_guarded() { :; }
@@ -2110,7 +1912,7 @@ EOF
     [[ "$output" == *"Developer tools"*"Nothing to clean"* ]]
 }
 
-@test "clean_dev_mobile uses one successful simctl list for probe and data" {
+@test "clean_dev_mobile probes simctl once per question and never twice for one" {
     local call_log="$HOME/simctl-single-list.log"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true \
@@ -2121,7 +1923,6 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 _xcode_safe_clean_guarded() { :; }
@@ -2146,8 +1947,28 @@ EOF
         echo "$output"
         return 1
     }
-    [ "$(wc -l < "$call_log" | tr -d ' ')" -eq 1 ] || return 1
-    [ "$(< "$call_log")" = "list devices unavailable" ] || return 1
+    # The unavailable-simulator step still resolves probe and data from a
+    # single call; that is the invariant this test was written for.
+    [ "$(grep -c '^list devices unavailable$' "$call_log" | tr -d ' ')" -eq 1 ] || {
+        cat "$call_log"
+        return 1
+    }
+    [ "$(sed -n 1p "$call_log")" = "list devices unavailable" ] || return 1
+    # The orphaned-runtime review reads two more payloads, and it reads them
+    # through _run_simctl so they stay visible here. Routing around the shared
+    # helper would hide the cost from this assertion rather than remove it.
+    [ "$(sed -n 2p "$call_log")" = "runtime list -j" ] || {
+        cat "$call_log"
+        return 1
+    }
+    [ "$(sed -n 3p "$call_log")" = "list devices -j" ] || {
+        cat "$call_log"
+        return 1
+    }
+    [ "$(wc -l < "$call_log" | tr -d ' ')" -eq 3 ] || {
+        cat "$call_log"
+        return 1
+    }
 }
 
 @test "clean_dev_mobile continues cleanup when simctl is unavailable" {
@@ -2177,7 +1998,6 @@ mkdir -p "${_MOLE_SIMCTL_XCODE_APP_ROOTS[0]}"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { echo "DEVICE_SUPPORT:$2"; }
 safe_clean() { echo "SAFE_CLEAN:$2"; }
@@ -2232,7 +2052,6 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2286,7 +2105,6 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2381,7 +2199,6 @@ _MOLE_SIMCTL_XCODE_APP_ROOTS=("$HOME/Applications")
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2434,7 +2251,6 @@ _MOLE_SIMCTL_XCODE_APP_ROOTS=("$HOME/Applications")
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2486,7 +2302,6 @@ _MOLE_SIMCTL_XCODE_APP_ROOTS=("$HOME/Applications")
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2542,7 +2357,6 @@ _MOLE_SIMCTL_XCODE_APP_ROOTS=("$HOME/Applications")
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2596,7 +2410,6 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2654,7 +2467,6 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2685,7 +2497,6 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }
@@ -2758,7 +2569,6 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 check_android_ndk() { :; }
 clean_xcode_documentation_cache() { :; }
 clean_xcode_system_coresimulator_caches() { :; }
-clean_xcode_simulator_runtime_volumes() { :; }
 clean_xcode_xctest_devices() { :; }
 clean_xcode_device_support() { :; }
 safe_clean() { :; }

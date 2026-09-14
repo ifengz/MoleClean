@@ -45,9 +45,19 @@ clean_ds_store_tree() {
 
     local delete_rc=0
     while IFS= read -r -d '' ds_file; do
+        if ! _mole_snapshot_path_identity "$ds_file"; then
+            continue
+        fi
+        local ds_parent="$_MOLE_PATH_SNAPSHOT_PARENT"
+        local ds_parent_id="$_MOLE_PATH_SNAPSHOT_PARENT_ID"
+        local ds_target_id="$_MOLE_PATH_SNAPSHOT_TARGET_ID"
         local size
         size=$(get_file_size "$ds_file")
         if [[ "$DRY_RUN" == "true" ]] && declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
+            if ! _mole_path_matches_identity \
+                "$ds_file" "$ds_parent" "$ds_parent_id" "$ds_target_id"; then
+                continue
+            fi
             local preview_size_kb=$(((size + 1023) / 1024))
             local preview_rc=0
             record_dry_run_cleanup_target "$ds_file" "$preview_size_kb" 1 true || preview_rc=$?
@@ -60,7 +70,9 @@ clean_ds_store_tree() {
         fi
         if [[ "$DRY_RUN" != "true" ]]; then
             local remove_rc=0
-            safe_remove "$ds_file" true 2> /dev/null || remove_rc=$?
+            safe_remove "$ds_file" true "" "" \
+                "$ds_parent" "$ds_parent_id" "$ds_target_id" \
+                2> /dev/null || remove_rc=$?
             if [[ $remove_rc -eq 124 || $remove_rc -ge 128 ]]; then
                 delete_rc=$remove_rc
                 break
@@ -208,7 +220,7 @@ scan_installed_apps() {
         (
             local worker_started_at=$SECONDS
             local app_paths
-            if ! app_paths=$(command find "$app_dir" -maxdepth 3 -type d -name '*.app' 2> /dev/null); then
+            if ! app_paths=$(command find "$app_dir" -maxdepth 3 -type d -iname '*.app' 2> /dev/null); then
                 printf '%s\n' "$app_dir" >> "$scan_tmp_dir/scan_failures.list"
                 exit 1
             fi
@@ -220,7 +232,7 @@ scan_installed_apps() {
                 # whose plist is not under Contents/, which then failed the
                 # scan. Helper bundles nested elsewhere are left alone.
                 case "$app_path" in
-                    */Wrapper/*.app) continue ;;
+                    */Wrapper/*.[aA][pP][pP]) continue ;;
                 esac
                 local plist_path="$app_path/Contents/Info.plist"
                 # iOS and iPadOS apps installed on Apple Silicon have no
@@ -231,7 +243,7 @@ scan_installed_apps() {
                 # App leftovers section.
                 if [[ ! -f "$plist_path" ]]; then
                     local wrapped_plist=""
-                    for wrapped_plist in "$app_path"/Wrapper/*.app/Info.plist; do
+                    for wrapped_plist in "$app_path"/Wrapper/*.[aA][pP][pP]/Info.plist; do
                         if [[ -f "$wrapped_plist" ]]; then
                             plist_path="$wrapped_plist"
                             break
@@ -1152,7 +1164,7 @@ clean_orphaned_system_services() {
         # prefers a stale plist false negative over deleting a live updater's
         # registration. See #1447.
         case "$binary" in
-            /Library/PrivilegedHelperTools/*.app/Contents/MacOS/*)
+            /Library/PrivilegedHelperTools/*.[aA][pP][pP]/Contents/MacOS/*)
                 return 1
                 ;;
         esac

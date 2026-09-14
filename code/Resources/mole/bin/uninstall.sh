@@ -5,6 +5,13 @@
 
 set -euo pipefail
 
+# User state and installed tools must never run with inherited root privileges.
+# Individual maintenance operations request administrator access themselves.
+if [[ "$EUID" -eq 0 ]]; then
+    printf '%s\n' 'Run Mole without sudo; it requests administrator access when needed.' >&2
+    exit 1
+fi
+
 # Preserve user's locale for app display name lookup.
 readonly MOLE_UNINSTALL_USER_LC_ALL="${LC_ALL:-}"
 readonly MOLE_UNINSTALL_USER_LANG="${LANG:-}"
@@ -33,7 +40,7 @@ files_cleaned=0
 total_size_cleaned=0
 
 readonly MOLE_UNINSTALL_META_CACHE_DIR="$HOME/.cache/mole"
-readonly MOLE_UNINSTALL_META_CACHE_FILE="$MOLE_UNINSTALL_META_CACHE_DIR/uninstall_app_metadata_v2"
+readonly MOLE_UNINSTALL_META_CACHE_FILE="$MOLE_UNINSTALL_META_CACHE_DIR/uninstall_app_metadata_v3"
 readonly MOLE_UNINSTALL_META_CACHE_LOCK="${MOLE_UNINSTALL_META_CACHE_FILE}.lock"
 readonly MOLE_UNINSTALL_META_REFRESH_TTL=604800 # 7 days
 readonly MOLE_UNINSTALL_EPOCH_FLOOR=978307200
@@ -110,14 +117,122 @@ uninstall_inline_du_size_kb() {
     echo "0"
 }
 
+# The user's UI language preference, most preferred first. Resolved once per
+# run: `defaults` costs a fork, and the answer cannot change mid-scan. An empty
+# result (no `defaults`, or a fresh account with no array) simply skips the
+# localized lookup and leaves the bundle's unlocalized names in charge.
+mole_uninstall_preferred_languages() {
+    defaults read -g AppleLanguages 2> /dev/null |
+        sed -e 's/[()"]//g' -e 's/,//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
+        grep -v '^$'
+}
+
+# Directory names to try inside Contents/Resources for one BCP-47 tag, most
+# specific first. macOS bundles spell the same locale several ways, so
+# "zh-Hans-CN" has to reach a zh-Hans.lproj, a zh_CN.lproj or a bare zh.lproj.
+_uninstall_lproj_candidates() {
+    local tag="$1"
+    [[ -n "$tag" ]] || return 0
+
+    local base script region rest
+    base="${tag%%-*}"
+    rest="${tag#"$base"}"
+    rest="${rest#-}"
+    script=""
+    region=""
+    if [[ -n "$rest" ]]; then
+        local second="${rest%%-*}"
+        if [[ "$second" =~ ^[A-Z][a-z]{3}$ ]]; then
+            script="$second"
+            region="${rest#"$second"}"
+            region="${region#-}"
+        else
+            region="$second"
+        fi
+    fi
+
+    printf '%s\n' "$tag" "${tag//-/_}"
+    [[ -n "$script" ]] && printf '%s\n' "${base}-${script}" "${base}_${script}"
+    [[ -n "$region" ]] && printf '%s\n' "${base}_${region}" "${base}-${region}"
+    printf '%s\n' "$base"
+}
+
+readonly MOLE_UNINSTALL_PREFERRED_LANGS="$(mole_uninstall_preferred_languages)"
+# Display names depend on the ordered language list. Keep the fingerprint in
+# each cache row so a language change invalidates only the derived name while
+# size and last-used metadata remain reusable.
+readonly MOLE_UNINSTALL_LANGUAGE_SIGNATURE="$(printf '%s' "$MOLE_UNINSTALL_PREFERRED_LANGS" | cksum | awk '{print $1 ":" $2}')"
+
+# The bundle's own name for a locale, read from the same InfoPlist.strings that
+# Finder consults. Prints nothing when the bundle does not localize the name,
+# which leaves the caller on the unlocalized Info.plist values.
+#
+# The search stops at the first preferred language the bundle localizes at all,
+# and never continues into a language the user did not ask for. MiaoYan.app is
+# the case that rule exists for: it ships zh-Hans.lproj but no en.lproj, and an
+# English-preferring Mac shows "MiaoYan", not the Chinese name that happens to
+# be the only override present.
+_uninstall_localized_bundle_name() {
+    local app_path="$1"
+    local resources="$app_path/Contents/Resources"
+    [[ -d "$resources" ]] || return 0
+
+    local dev_region=""
+    dev_region=$(plutil -extract CFBundleDevelopmentRegion raw "$app_path/Contents/Info.plist" 2> /dev/null || echo "")
+    case "$dev_region" in
+        English) dev_region="en" ;;
+        Japanese) dev_region="ja" ;;
+        French) dev_region="fr" ;;
+        German) dev_region="de" ;;
+    esac
+    local dev_base="${dev_region%%-*}"
+
+    local lang candidate lproj=""
+    while IFS= read -r lang; do
+        [[ -n "$lang" ]] || continue
+        while IFS= read -r candidate; do
+            if [[ -d "$resources/$candidate.lproj" ]]; then
+                lproj="$resources/$candidate.lproj"
+                break
+            fi
+        done < <(_uninstall_lproj_candidates "$lang")
+        [[ -n "$lproj" ]] && break
+
+        # Base.lproj carries the development region, so a bundle with only
+        # Base.lproj still counts as localized for that language.
+        if [[ -n "$dev_base" && "${lang%%-*}" == "$dev_base" && -d "$resources/Base.lproj" ]]; then
+            lproj="$resources/Base.lproj"
+            break
+        fi
+    done <<< "$MOLE_UNINSTALL_PREFERRED_LANGS"
+
+    [[ -n "$lproj" && -f "$lproj/InfoPlist.strings" ]] || return 0
+
+    local localized
+    localized=$(plutil -extract CFBundleDisplayName raw -- "$lproj/InfoPlist.strings" 2> /dev/null || echo "")
+    if [[ -z "$localized" || "$localized" == "(null)" ]]; then
+        localized=$(plutil -extract CFBundleName raw -- "$lproj/InfoPlist.strings" 2> /dev/null || echo "")
+    fi
+    [[ -n "$localized" && "$localized" != "(null)" ]] || return 0
+    printf '%s' "$localized"
+}
+
 uninstall_resolve_display_name() {
     local app_path="$1"
     local app_name="$2"
     local display_name="$app_name"
 
     if [[ -f "$app_path/Contents/Info.plist" ]]; then
-        local md_display_name
-        if [[ -n "$MOLE_UNINSTALL_USER_LC_ALL" ]]; then
+        # The bundle's own localized name is what Finder shows, so it wins and
+        # spares the mdls fork. mdls only ever reports the on-disk file name for
+        # an app bundle, which is exactly the unrecognizable string this avoids.
+        local localized_name
+        localized_name=$(_uninstall_localized_bundle_name "$app_path")
+
+        local md_display_name=""
+        if [[ -n "$localized_name" ]]; then
+            :
+        elif [[ -n "$MOLE_UNINSTALL_USER_LC_ALL" ]]; then
             md_display_name=$(run_with_timeout "$MOLE_UNINSTALL_INLINE_MDLS_DISPLAY_TIMEOUT_SEC" env LC_ALL="$MOLE_UNINSTALL_USER_LC_ALL" LANG="$MOLE_UNINSTALL_USER_LANG" mdls -name kMDItemDisplayName -raw "$app_path" 2> /dev/null || echo "")
         elif [[ -n "$MOLE_UNINSTALL_USER_LANG" ]]; then
             md_display_name=$(run_with_timeout "$MOLE_UNINSTALL_INLINE_MDLS_DISPLAY_TIMEOUT_SEC" env LANG="$MOLE_UNINSTALL_USER_LANG" mdls -name kMDItemDisplayName -raw "$app_path" 2> /dev/null || echo "")
@@ -142,7 +257,9 @@ uninstall_resolve_display_name() {
         bundle_name="${bundle_name//|/-}"
         bundle_name="${bundle_name//[$'\t\r\n']/}"
 
-        if [[ -n "$md_display_name" && "$md_display_name" != "(null)" && "$md_display_name" != "$app_name" ]]; then
+        if [[ -n "$localized_name" ]]; then
+            display_name="$localized_name"
+        elif [[ -n "$md_display_name" && "$md_display_name" != "(null)" && "$md_display_name" != "$app_name" ]]; then
             display_name="$md_display_name"
         elif [[ -n "$bundle_display_name" && "$bundle_display_name" != "(null)" ]]; then
             display_name="$bundle_display_name"
@@ -164,7 +281,7 @@ uninstall_resolve_display_name() {
         fi
     fi
 
-    display_name="${display_name%.app}"
+    display_name="${display_name%.[aA][pP][pP]}"
     display_name="${display_name//|/-}"
     display_name="${display_name//[$'\t\r\n']/}"
     echo "$display_name"
@@ -276,7 +393,7 @@ start_uninstall_metadata_refresh() {
         local -a worker_pids=()
         local worker_idx=0
 
-        while IFS='|' read -r app_path app_mtime bundle_id display_name; do
+        while IFS='|' read -r app_path app_mtime bundle_id display_name language_signature; do
             [[ -n "$app_path" && -d "$app_path" ]] || continue
             ((worker_idx++))
             local worker_output="${updates_file}.${worker_idx}"
@@ -300,7 +417,7 @@ start_uninstall_metadata_refresh() {
                 size_kb=$(get_path_size_kb "$app_path")
                 [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
 
-                printf "%s|%s|%s|%s|%s|%s|%s\n" "$app_path" "${app_mtime:-0}" "$size_kb" "${last_used_epoch:-0}" "$now_epoch" "$bundle_id" "$display_name" > "$worker_output"
+                printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$app_path" "${app_mtime:-0}" "$size_kb" "${last_used_epoch:-0}" "$now_epoch" "$bundle_id" "$display_name" "$language_signature" > "$worker_output"
             ) < /dev/null &
             worker_pids+=($!)
 
@@ -402,9 +519,9 @@ uninstall_should_skip_app_path() {
 
     [[ -e "$app_path" ]] || return 0
 
-    # Skip nested apps inside another .app bundle.
+    # Skip nested apps inside another case-variant .app bundle.
     local parent_dir="${app_path%/*}"
-    if [[ "$parent_dir" == *".app" || "$parent_dir" == *".app/"* ]]; then
+    if [[ "$parent_dir" == *.[aA][pP][pP] || "$parent_dir" == *.[aA][pP][pP]/* ]]; then
         return 0
     fi
 
@@ -526,7 +643,7 @@ uninstall_print_app_paths_with_mtime() {
         [[ -n "$app_path" ]] || continue
         app_mtime=$(get_file_mtime "$app_path")
         printf '%s\t%s\n' "${app_mtime:-0}" "$app_path"
-    done < <(command find "$app_dir" -maxdepth 3 -name "*.app" -print0 2> /dev/null)
+    done < <(command find "$app_dir" -maxdepth 3 -iname "*.app" -print0 2> /dev/null)
 }
 
 uninstall_app_inventory_fingerprint() {
@@ -604,7 +721,7 @@ _scan_discover_apps() {
 
         local already_scanned=false
         for app_dir in "${app_dirs[@]}"; do
-            if [[ "$pkg_app_path" == "$app_dir"/*.app ]]; then
+            if [[ "$pkg_app_path" == "$app_dir"/*.[aA][pP][pP] ]]; then
                 already_scanned=true
                 break
             fi
@@ -612,7 +729,7 @@ _scan_discover_apps() {
         [[ "$already_scanned" == true ]] && continue
 
         local app_name="${pkg_app_path##*/}"
-        app_name="${app_name%.app}"
+        app_name="${app_name%.[aA][pP][pP]}"
 
         local app_mtime
         app_mtime=$(get_file_mtime "$pkg_app_path")
@@ -627,7 +744,7 @@ _scan_discover_apps() {
             if [[ ! -e "$app_path" ]]; then continue; fi
 
             local app_name="${app_path##*/}"
-            app_name="${app_name%.app}"
+            app_name="${app_name%.[aA][pP][pP]}"
 
             uninstall_should_skip_app_path "$app_path" && continue
 
@@ -660,22 +777,24 @@ _scan_partition_cache() {
     }
 
     if [[ -s "$discovered_file" ]]; then
-        awk -F'|' -v cached_out="$cached_rows_file" -v uncached_out="$uncached_rows_file" '
+        awk -F'|' -v cached_out="$cached_rows_file" -v uncached_out="$uncached_rows_file" -v language_signature="$MOLE_UNINSTALL_LANGUAGE_SIGNATURE" '
             FILENAME == ARGV[1] {
                 cache_mtime[$1] = $2
                 cache_size[$1] = $3
                 cache_bundle[$1] = $6
                 cache_display[$1] = $7
+                cache_language[$1] = $8
                 next
             }
             {
                 path = $1
                 app_mtime = $3
-                if (cache_mtime[path] == app_mtime && cache_display[path] != "" && cache_size[path] ~ /^[0-9]+$/ && cache_size[path] > 0) {
+                if (cache_mtime[path] == app_mtime && cache_display[path] != "" && cache_language[path] == language_signature && cache_size[path] ~ /^[0-9]+$/ && cache_size[path] > 0) {
                     cached_bundle = cache_bundle[path] == "" ? "unknown" : cache_bundle[path]
                     print path "|" app_mtime "|" cached_bundle "|" cache_display[path] "|" cache_size[path] >> cached_out
                 } else {
-                    print path "|" $2 "|" app_mtime "|" cache_bundle[path] "|" cache_display[path] >> uncached_out
+                    cached_display = cache_language[path] == language_signature ? cache_display[path] : ""
+                    print path "|" $2 "|" app_mtime "|" cache_bundle[path] "|" cached_display >> uncached_out
                 }
             }
         ' "$cache_source" "$discovered_file"
@@ -733,7 +852,7 @@ _scan_resolve_uncached() {
             display_name=$(uninstall_resolve_display_name "$app_path" "$app_name")
         fi
 
-        display_name="${display_name%.app}"
+        display_name="${display_name%.[aA][pP][pP]}"
         display_name="${display_name//|/-}"
         display_name="${display_name//[$'\t\r\n']/}"
 
@@ -794,7 +913,7 @@ _scan_dedupe_bundle_ids() {
                 return 0
             }
             rest = substr(path, length(prefix) + 1)
-            return index(rest, "/") == 0 && rest ~ /[.]app$/
+            return index(rest, "/") == 0 && tolower(rest) ~ /[.]app$/
         }
         function path_rank(path) {
             if (direct_app_under(path, "/Applications/")) {
@@ -872,14 +991,15 @@ _scan_finalize_index() {
             cache_updated[$1] = $5
             cache_bundle[$1] = $6
             cache_display[$1] = $7
+            cache_language[$1] = $8
             next
         }
         {
-            print $0 "|" cache_mtime[$1] "|" cache_size[$1] "|" cache_epoch[$1] "|" cache_updated[$1] "|" cache_bundle[$1] "|" cache_display[$1]
+            print $0 "|" cache_mtime[$1] "|" cache_size[$1] "|" cache_epoch[$1] "|" cache_updated[$1] "|" cache_bundle[$1] "|" cache_display[$1] "|" cache_language[$1]
         }
     ' "$cache_source" "$scan_raw_file" > "$merged_file"
     if [[ ! -s "$merged_file" && -s "$scan_raw_file" ]]; then
-        awk '{print $0 "||||||"}' "$scan_raw_file" > "$merged_file"
+        awk '{print $0 "|||||||"}' "$scan_raw_file" > "$merged_file"
     fi
 
     local current_epoch
@@ -893,6 +1013,7 @@ _scan_finalize_index() {
         -v now="$current_epoch" \
         -v floor="$MOLE_UNINSTALL_EPOCH_FLOOR" \
         -v ttl="$MOLE_UNINSTALL_META_REFRESH_TTL" \
+        -v language_signature="$MOLE_UNINSTALL_LANGUAGE_SIGNATURE" \
         -v refresh_out="$refresh_file" \
         -v snapshot_out="$cache_snapshot_file" \
         -v apps_out="$temp_file" '
@@ -950,7 +1071,15 @@ _scan_finalize_index() {
                 display_name = $2
                 bundle_id = $3
                 app_mtime = $4
-                if (NF >= 11) {
+                # A merged row is the 5-field scan row plus the 7 cache fields
+                # appended above, so 12 is the only width the current writers
+                # produce. The threshold has to track that sum: while the cache
+                # block was 6 fields wide, 11 named the same shape, and leaving
+                # it at 11 after the language signature landed would have let a
+                # hypothetical 11-field row take this branch and read every
+                # cached_* value shifted by one, so the signature itself would
+                # render as the display name.
+                if (NF >= 12) {
                     inline_size_kb = $5
                     cached_mtime = $6
                     cached_size_kb = $7
@@ -958,6 +1087,7 @@ _scan_finalize_index() {
                     cached_updated_epoch = $9
                     cached_bundle_id = $10
                     cached_display_name = $11
+                    cached_language_signature = $12
                 } else {
                     inline_size_kb = 0
                     cached_mtime = $5
@@ -966,6 +1096,7 @@ _scan_finalize_index() {
                     cached_updated_epoch = $8
                     cached_bundle_id = $9
                     cached_display_name = $10
+                    cached_language_signature = ""
                 }
 
                 cache_match = (cached_mtime != "" && app_mtime != "" && cached_mtime == app_mtime)
@@ -996,16 +1127,18 @@ _scan_finalize_index() {
                     needs_refresh = 1
                 } else if (cached_bundle_id == "" || cached_display_name == "") {
                     needs_refresh = 1
+                } else if (cached_language_signature != language_signature) {
+                    needs_refresh = 1
                 } else if ((now - cached_updated_epoch) > ttl) {
                     needs_refresh = 1
                 }
 
                 if (needs_refresh) {
-                    print app_path "|" app_mtime "|" bundle_id "|" display_name >> refresh_out
+                    print app_path "|" app_mtime "|" bundle_id "|" display_name "|" language_signature >> refresh_out
                 }
 
                 persist_updated_epoch = (isnum(cached_updated_epoch) && cached_updated_epoch > 0) ? cached_updated_epoch : 0
-                print app_path "|" app_mtime "|" final_size_kb "|" final_epoch "|" persist_updated_epoch "|" bundle_id "|" display_name >> snapshot_out
+                print app_path "|" app_mtime "|" final_size_kb "|" final_epoch "|" persist_updated_epoch "|" bundle_id "|" display_name "|" language_signature >> snapshot_out
                 print final_epoch "|" app_path "|" display_name "|" bundle_id "|" final_size "|" final_last_used "|" final_size_kb >> apps_out
             }
         ' "$merged_file"
@@ -1121,7 +1254,7 @@ scan_applications() {
             cleanup_spinner() { exit 0; }
             trap cleanup_spinner TERM INT EXIT
             [[ -f "$scan_status_file" ]] || exit 0
-            local spinner_chars="|/-\\"
+            mo_load_spinner_frames
             local i=0
             : > "$spinner_shown_file"
             while true; do
@@ -1129,7 +1262,7 @@ scan_applications() {
                 status_line=$(cat "$scan_status_file" 2> /dev/null || echo "")
                 IFS='|' read -r status_message status_completed status_total <<< "$status_line"
                 [[ -z "$status_message" ]] && status_message="Scanning applications..."
-                local c="${spinner_chars:$((i % 4)):1}"
+                local c="${MO_SPINNER_FRAMES[$((i % ${#MO_SPINNER_FRAMES[@]}))]}"
                 if [[ "$status_completed" =~ ^[0-9]+$ && "$status_total" =~ ^[0-9]+$ && $status_total -gt 0 ]]; then
                     printf "\r\033[K%s %s %d/%d" "$c" "$status_message" "$status_completed" "$status_total" >&2
                 else
@@ -1292,7 +1425,9 @@ match_apps_by_name() {
                 IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$word_app"
                 local word_name_lower word_dir_lower
                 word_name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
-                word_dir_lower=$(basename "$app_path" .app | tr '[:upper:]' '[:lower:]')
+                word_dir_lower=$(basename "$app_path")
+                word_dir_lower="${word_dir_lower%.[aA][pP][pP]}"
+                word_dir_lower=$(printf '%s' "$word_dir_lower" | tr '[:upper:]' '[:lower:]')
                 if [[ "$word_name_lower" == "$word_lower" || "$word_dir_lower" == "$word_lower" ]]; then
                     word_hit=true
                     break
@@ -1311,7 +1446,9 @@ match_apps_by_name() {
                 IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$joined_app"
                 local joined_name_lower joined_dir_lower
                 joined_name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
-                joined_dir_lower=$(basename "$app_path" .app | tr '[:upper:]' '[:lower:]')
+                joined_dir_lower=$(basename "$app_path")
+                joined_dir_lower="${joined_dir_lower%.[aA][pP][pP]}"
+                joined_dir_lower=$(printf '%s' "$joined_dir_lower" | tr '[:upper:]' '[:lower:]')
                 if [[ "$joined_name_lower" == "$joined_lower" || "$joined_dir_lower" == "$joined_lower" ]]; then
                     selected_apps=("$joined_app")
                     return 0
@@ -1336,7 +1473,8 @@ match_apps_by_name() {
             name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
             # Also try matching against the .app directory base name
             local dir_name
-            dir_name=$(basename "$app_path" .app)
+            dir_name=$(basename "$app_path")
+            dir_name="${dir_name%.[aA][pP][pP]}"
             local dir_lower
             dir_lower=$(echo "$dir_name" | tr '[:upper:]' '[:lower:]')
 
@@ -1366,7 +1504,8 @@ match_apps_by_name() {
                 local name_lower
                 name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
                 local dir_name
-                dir_name=$(basename "$app_path" .app)
+                dir_name=$(basename "$app_path")
+                dir_name="${dir_name%.[aA][pP][pP]}"
                 local dir_lower
                 dir_lower=$(echo "$dir_name" | tr '[:upper:]' '[:lower:]')
 
@@ -1554,14 +1693,14 @@ main() {
                 list_mode=1
                 ;;
             "--whitelist")
-                echo "Unknown uninstall option: $arg"
-                echo "Whitelist management is currently supported by: mo clean --whitelist / mo optimize --whitelist"
-                echo "Use 'mo uninstall --help' for supported options."
+                echo "Unknown uninstall option: $arg" >&2
+                echo "Whitelist management is currently supported by: mo clean --whitelist / mo optimize --whitelist" >&2
+                echo "Use 'mo uninstall --help' for supported options." >&2
                 exit 1
                 ;;
             -*)
-                echo "Unknown uninstall option: $arg"
-                echo "Use 'mo uninstall --help' for supported options."
+                echo "Unknown uninstall option: $arg" >&2
+                echo "Use 'mo uninstall --help' for supported options." >&2
                 exit 1
                 ;;
             *)
@@ -1829,7 +1968,7 @@ main() {
         local _pressed=false
         while [[ $_countdown -gt 0 ]]; do
             printf "\r${GRAY}Press Enter to return to the app list, press q to exit (%d)${NC} " "$_countdown"
-            if IFS= read -r -s -n1 -t 1 _key; then
+            if IFS= read -r -s -n1 -t 1 _key 2> /dev/null; then
                 _pressed=true
                 break
             fi

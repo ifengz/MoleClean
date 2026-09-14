@@ -544,6 +544,54 @@ EOF
     [[ "$output" != *"UNEXPECTED_SAFE_CLEAN"* ]]
 }
 
+@test "whitelist row keeps FCP proxy media while render files are cleaned (#1499)" {
+    run env HOME="$HOME/fcp-1499" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/manage/whitelist.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+
+# Flat and nested libraries: the nested one pins the segment-spanning glob.
+flat_proxy="$HOME/Movies/Project.fcpbundle/Event/Transcoded Media/Proxy Media"
+flat_render="$HOME/Movies/Project.fcpbundle/Event/Render Files/High Quality Media"
+nested_proxy="$HOME/Movies/Sub/Nested.fcpbundle/Event/Transcoded Media/Proxy Media"
+nested_render="$HOME/Movies/Sub/Nested.fcpbundle/Event/Render Files/High Quality Media"
+mkdir -p "$flat_proxy" "$flat_render" "$nested_proxy" "$nested_render"
+touch "$flat_proxy/proxy.mov" "$flat_render/render.mov"
+touch "$nested_proxy/proxy.mov" "$nested_render/render.mov"
+
+# Use the shipped catalog pattern, not a hand-written copy, so this test goes
+# red when the row is absent (pre-fix) or its pattern drifts.
+fcp_pattern=""
+while IFS='|' read -r name pattern _; do
+    if [[ "$name" == "Final Cut Pro proxy media"* ]]; then
+        fcp_pattern="${pattern/\$HOME/$HOME}"
+    fi
+done < <(get_all_cache_items)
+[[ -n "$fcp_pattern" ]] || exit 1
+
+WHITELIST_PATTERNS=("$fcp_pattern")
+pgrep() { return 1; }
+defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+safe_clean() {
+    local arg
+    for arg in "$@"; do
+        printf 'CLEAN:%s\n' "$arg"
+    done
+}
+
+clean_final_cut_pro_generated_caches
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"CLEAN:$HOME/fcp-1499/Movies/Project.fcpbundle/Event/Render Files/High Quality Media"* ]] || return 1
+    [[ "$output" == *"CLEAN:$HOME/fcp-1499/Movies/Sub/Nested.fcpbundle/Event/Render Files/High Quality Media"* ]] || return 1
+    [[ "$output" != *"Transcoded Media/Proxy Media"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]]
+}
+
 @test "clean_jianying_pro_generated_caches targets only whitelisted regenerable subdirs" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -875,6 +923,143 @@ EOF
     [[ "$output" == *"Microsoft Teams legacy logs"* ]]
 }
 
+@test "clean_communication_apps cleans Feishu embedded webview Service Worker per profile" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+feishu_base="$HOME/Library/Application Support/LarkShell/aha/users"
+lark_base="$HOME/Library/Application Support/LarkInternational/aha/users"
+mkdir -p "$feishu_base/57bea93a/profile_explorer/Service Worker/CacheStorage"
+mkdir -p "$feishu_base/6ef03470/profile_explorer/Service Worker/CacheStorage"
+mkdir -p "$lark_base/70ac6ef0/profile_explorer/Service Worker/CacheStorage"
+# A non-profile sibling under users/ must be ignored.
+mkdir -p "$feishu_base/global"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "SC|$2"; }
+feishu_or_lark_running() { return 1; }
+clean_service_worker_cache() { echo "SW|$1|$2|$3|$4"; }
+clean_communication_apps
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SW|Feishu|$HOME/Library/Application Support/LarkShell/aha/users/57bea93a/profile_explorer/Service Worker/CacheStorage|_feishu_service_worker_delete_guard_allows|"* ]] || return 1
+    [[ "$output" == *"SW|Feishu|$HOME/Library/Application Support/LarkShell/aha/users/6ef03470/profile_explorer/Service Worker/CacheStorage|_feishu_service_worker_delete_guard_allows|"* ]] || return 1
+    [[ "$output" == *"SW|Lark|$HOME/Library/Application Support/LarkInternational/aha/users/70ac6ef0/profile_explorer/Service Worker/CacheStorage|_feishu_service_worker_delete_guard_allows|"* ]] || return 1
+    [[ "$output" != *"users/global/"* ]] || return 1
+}
+
+@test "clean_feishu_service_worker_caches preserves pipe characters in profile paths" {
+    local pipe_home="$HOME/home|pipe"
+    run env HOME="$pipe_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+cache="$HOME/Library/Application Support/LarkShell/aha/users/57bea93a/profile_explorer/Service Worker/CacheStorage"
+mkdir -p "$cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+feishu_or_lark_running() { return 1; }
+clean_service_worker_cache() { printf 'SW:%s:%s\n' "$1" "$2"; }
+clean_feishu_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"SW:Feishu:$pipe_home/Library/Application Support/LarkShell/aha/users/57bea93a/profile_explorer/Service Worker/CacheStorage"* ]]
+}
+
+@test "clean_feishu_service_worker_caches skips all profiles while owner is running" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+cache="$HOME/Library/Application Support/LarkShell/aha/users/57bea93a/profile_explorer/Service Worker/CacheStorage"
+mkdir -p "$cache/origin/cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+feishu_or_lark_running() { return 0; }
+mole_defer_cleanup_family() { echo "DEFER:$1"; }
+safe_remove() { echo "UNEXPECTED_REMOVE:$1"; return 0; }
+clean_feishu_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"DEFER:Feishu/Lark"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_REMOVE"* ]]
+}
+
+@test "clean_feishu_service_worker_caches fails closed on unknown owner state" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+cache="$HOME/Library/Application Support/LarkShell/aha/users/57bea93a/profile_explorer/Service Worker/CacheStorage"
+mkdir -p "$cache/origin/cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+feishu_or_lark_running() { return 2; }
+mole_defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+safe_remove() { echo "UNEXPECTED_REMOVE:$1"; return 0; }
+note_activity() { :; }
+clean_feishu_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"Feishu/Lark Service Worker · stopped (process state unknown)"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_REMOVE"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]]
+}
+
+@test "clean_feishu_service_worker_caches rechecks owner after sizing" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+marker="$HOME/feishu-started"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+declare -a PROTECTED_SW_DOMAINS=("never.invalid")
+cache="$HOME/Library/Application Support/LarkShell/aha/users/57bea93a/profile_explorer/Service Worker/CacheStorage"
+candidate="$cache/origin/cache"
+mkdir -p "$candidate"
+feishu_or_lark_running() { [[ -e "$marker" ]] && return 0 || return 1; }
+mole_defer_cleanup_family() { echo "DEFER:$1"; }
+safe_remove() { echo "UNEXPECTED_REMOVE:$1"; return 0; }
+note_activity() { :; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == "sh" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    if [[ "$1" == "du" ]]; then
+        touch "$marker"
+        printf '512\t%s\n' "$candidate"
+        return 0
+    fi
+    "$@"
+}
+clean_feishu_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"DEFER:Feishu/Lark"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_REMOVE"* ]]
+}
+
+@test "clean_feishu_service_worker_caches is a no-op when the aha profile root is absent" {
+    local empty_home
+    empty_home="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-app-caches.XXXXXX")"
+    run env HOME="$empty_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+clean_service_worker_cache() { echo "unexpected SW call"; }
+clean_feishu_service_worker_caches
+echo "done-no-op"
+EOF
+    rm -rf "$empty_home"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unexpected SW call"* ]] || return 1
+    [[ "$output" == *"done-no-op"* ]] || return 1
+}
+
 @test "clean_gaming_platforms includes steam and minecraft related caches" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -1001,6 +1186,40 @@ EOF
     [[ "$output" == *"CLEAN:$HOME/Library/Containers/is.follow/Data/Library/Application Support/Folo/Cache/Cache_Data/blob"* &&
         "$output" != *"Folo/Cache/other.bin"* &&
         "$output" != *"db.sqlite"* ]]
+}
+
+@test "clean_editor_obsolete_extensions reads JSON when plutil -p rejects raw file (#1512)" {
+    local ext_root="$HOME/.vscode/extensions"
+    mkdir -p "$ext_root/pub.ext-old-1.0.0"
+    cat > "$ext_root/.obsolete" << 'JSON'
+{
+  "pub.ext-old-1.0.0": true
+}
+JSON
+
+    local mock_bin="$HOME/bin"
+    mkdir -p "$mock_bin"
+    cat > "$mock_bin/plutil" << 'MOCK'
+#!/bin/bash
+if [[ "$1" == "-p" && "$2" == *"/.obsolete" ]]; then
+    echo "Unexpected character { at line 1" >&2
+    exit 1
+fi
+exec /usr/bin/plutil "$@"
+MOCK
+    chmod +x "$mock_bin/plutil"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$mock_bin:$PATH" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "CLEAN:$1"; }
+clean_editor_obsolete_extensions
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLEAN:$HOME/.vscode/extensions/pub.ext-old-1.0.0"* ]] || return 1
 }
 
 @test "clean_editor_obsolete_extensions removes only dirs listed in .obsolete (#910)" {
@@ -2180,4 +2399,326 @@ INNER
         return 1
     }
     [[ "$output" == *"CURRENT:$current|2.0.200"* ]]
+}
+
+@test "clean_wechat_container_caches cleans sandboxed containers and spares chat data" {
+    local iso="$HOME/iso-wechat-targets"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+wechat="$HOME/Library/Containers/com.tencent.xinWeChat/Data"
+wecom="$HOME/Library/Containers/com.tencent.WeWorkMac/Data"
+mkdir -p "$wechat/Documents/app_data/log" "$wechat/.wxapplet/WMPF"
+mkdir -p "$wecom/Library/Application Support/WXWork/Log"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Service Worker/CacheStorage/origin"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Service Worker/Database"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Service Worker/ScriptCache"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Cache"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Code Cache"
+mkdir -p "$wecom/Documents/cefcache/wew_1/GPUCache"
+touch "$wechat/Documents/app_data/log/wechat.log"
+touch "$wechat/.wxapplet/WMPF/mini-program.cache"
+touch "$wecom/Library/Application Support/WXWork/Log/wecom.log"
+touch "$wecom/Documents/cefcache/wew_1/Cache/web.cache"
+touch "$wecom/Documents/cefcache/wew_1/Code Cache/code.cache"
+touch "$wecom/Documents/cefcache/wew_1/GPUCache/gpu.cache"
+# User data siblings that must never be reached.
+mkdir -p "$wechat/Documents/xwechat_files/acct_1/db_storage"
+mkdir -p "$wechat/Documents/app_data/radium/users"
+mkdir -p "$wecom/Documents/Profiles/AAA/Messages1"
+mkdir -p "$wecom/Documents/Profiles/AAA/Publishsys/pkg"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Local Storage"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 1; }
+wecom_running() { return 1; }
+safe_clean_guarded() { shift; echo "SC|$*"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"Documents/app_data/log/"*"WeChat logs"* ]] || return 1
+    [[ "$output" == *".wxapplet/WMPF/"*"WeChat mini program cache"* ]] || return 1
+    [[ "$output" == *"WXWork/Log/"*"WeCom logs"* ]] || return 1
+    [[ "$output" == *"cefcache/wew_1/Service Worker/CacheStorage/"*"WeCom service worker cache"* ]] || return 1
+    [[ "$output" == *"cefcache/wew_1/Cache/"*"WeCom web cache"* ]] || return 1
+    [[ "$output" == *"cefcache/wew_1/Code Cache/"*"WeCom code cache"* ]] || return 1
+    [[ "$output" == *"cefcache/wew_1/GPUCache/"*"WeCom GPU cache"* ]] || return 1
+    # Chat databases, account state and unmeasured payloads stay untouched.
+    [[ "$output" != *"xwechat_files"* ]] || return 1
+    [[ "$output" != *"radium/users"* ]] || return 1
+    [[ "$output" != *"Messages1"* ]] || return 1
+    [[ "$output" != *"Publishsys"* ]] || return 1
+    [[ "$output" != *"Local Storage"* ]] || return 1
+    [[ "$output" != *"Service Worker/Database"* ]] || return 1
+    [[ "$output" != *"Service Worker/ScriptCache"* ]] || return 1
+}
+
+@test "clean_wechat_container_caches skips every target while an owner is running" {
+    local iso="$HOME/iso-wechat-running"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+wecom="$HOME/Library/Containers/com.tencent.WeWorkMac/Data"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Cache"
+mkdir -p "$wecom/Library/Application Support/WXWork/Log"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 0; }
+wecom_running() { return 0; }
+safe_clean_guarded() { shift; echo "SC|$*"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"SC|"* ]] || return 1
+}
+
+@test "clean_wechat_container_caches fails closed when process state is unknown" {
+    local iso="$HOME/iso-wechat-unknown"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+wecom="$HOME/Library/Containers/com.tencent.WeWorkMac/Data"
+mkdir -p "$wecom/Documents/cefcache/wew_1/Cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 1; }
+wecom_running() { return 2; }
+safe_clean_guarded() { shift; echo "SC|$*"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"SC|"* ]] || return 1
+}
+
+@test "clean_wechat_container_caches refuses a symlinked WeCom profile" {
+    local iso="$HOME/iso-wechat-symlink"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+wecom="$HOME/Library/Containers/com.tencent.WeWorkMac/Data"
+mkdir -p "$wecom/Documents/cefcache"
+mkdir -p "$HOME/elsewhere/Cache"
+ln -s "$HOME/elsewhere" "$wecom/Documents/cefcache/wew_evil"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 1; }
+wecom_running() { return 1; }
+safe_clean_guarded() { shift; echo "SC|$*"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"elsewhere"* ]] || return 1
+    [[ "$output" != *"wew_evil"* ]] || return 1
+}
+
+@test "clean_wechat_container_caches ignores WeCom component payloads under cefcache" {
+    local iso="$HOME/iso-wechat-components"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+cef="$HOME/Library/Containers/com.tencent.WeWorkMac/Data/Documents/cefcache"
+# A real profile owns Chromium cache directories.
+mkdir -p "$cef/Default/Cache" "$cef/Default/Service Worker/CacheStorage/origin"
+mkdir -p "$cef/wew_1688857906463120/Cache"
+# Component-updater payloads sit beside profiles and hold version directories.
+mkdir -p "$cef/AutofillStates/2024.11.26.0"
+mkdir -p "$cef/CertificateRevocation/2025.6.13.84507" "$cef/CertificateRevocation/Cache"
+mkdir -p "$cef/CookieReadinessList/2024.11.26.0"
+touch "$cef/CertificateRevocation/Cache/component-sentinel"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 1; }
+wecom_running() { return 1; }
+safe_clean_guarded() { shift; echo "SC|$*"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"cefcache/Default/Cache/"* ]] || return 1
+    [[ "$output" == *"cefcache/wew_1688857906463120/Cache/"* ]] || return 1
+    [[ "$output" != *"AutofillStates"* ]] || return 1
+    [[ "$output" != *"CertificateRevocation"* ]] || return 1
+    [[ "$output" != *"CookieReadinessList"* ]] || return 1
+}
+
+@test "clean_wechat_container_caches stays quiet when every cache root is empty" {
+    local iso="$HOME/iso-wechat-empty"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/Library/Containers/com.tencent.xinWeChat/Data"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 0; }
+wecom_running() { return 1; }
+mole_report_guard_stop() { echo "DEFER"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ -z "$output" ]]
+}
+
+@test "clean_wechat_container_caches does not let a running WeChat block idle WeCom" {
+    local iso="$HOME/iso-messaging-independent"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+wechat="$HOME/Library/Containers/com.tencent.xinWeChat/Data"
+wecom="$HOME/Library/Containers/com.tencent.WeWorkMac/Data"
+mkdir -p "$wechat/Documents/app_data/log" "$wecom/Documents/cefcache/wew_1/Cache"
+touch "$wechat/Documents/app_data/log/wechat.log" "$wecom/Documents/cefcache/wew_1/Cache/wecom.cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 0; }
+wecom_running() { return 1; }
+safe_clean_guarded() { shift; echo "SC|$*"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"wechat.log"* ]] || return 1
+    [[ "$output" == *"wecom.cache"* ]]
+}
+
+@test "wecom_running recognizes the localized main process" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+mole_pgrep_any() {
+    while [[ $# -ge 2 ]]; do
+        [[ "$1" == "-x" && "$2" == "企业微信" ]] && return 0
+        shift 2
+    done
+    return 1
+}
+wecom_running
+EOF
+
+    [ "$status" -eq 0 ]
+}
+
+@test "clean_wechat_container_caches refuses a symlinked WeCom cache root" {
+    local iso="$HOME/iso-wecom-cache-symlink"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+profile="$HOME/Library/Containers/com.tencent.WeWorkMac/Data/Documents/cefcache/wew_1"
+mkdir -p "$profile" "$HOME/outside"
+touch "$HOME/outside/private"
+ln -s "$HOME/outside" "$profile/Cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 1; }
+wecom_running() { return 1; }
+safe_clean_guarded() { shift; echo "SC|$*"; }
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"outside/private"* ]] || return 1
+    [[ "$output" != *"WeCom web cache"* ]]
+}
+
+@test "clean_wechat_container_caches refuses a WeCom cache child symlink" {
+    local iso="$HOME/iso-wecom-cache-child-symlink"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+cache_root="$HOME/Library/Containers/com.tencent.WeWorkMac/Data/Documents/cefcache/wew_1/Cache"
+mkdir -p "$cache_root" "$HOME/outside"
+touch "$HOME/outside/private"
+ln -s "$HOME/outside" "$cache_root/escaped"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_or_wecom_running() { return 1; }
+wechat_running() { return 1; }
+wecom_running() { return 1; }
+safe_clean_guarded() {
+    local guard="$1"
+    local path="$2"
+    "$guard" "$path" && echo "UNSAFE:$path"
+    return 0
+}
+clean_wechat_container_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"UNSAFE:"* ]]
+}
+
+@test "clean_wechat_container_caches refuses a symlinked WeChat Data root" {
+    local iso="$HOME/iso-wechat-data-symlink"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+container="$HOME/Library/Containers/com.tencent.xinWeChat"
+outside="$HOME/outside-data"
+mkdir -p "$container" "$outside/Documents/app_data/log"
+touch "$outside/Documents/app_data/log/private"
+ln -s "$outside" "$container/Data"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_or_wecom_running() { return 1; }
+_wechat_container_process_guard_allows() { return 0; }
+_mole_should_refuse_live_user_cache_path() { return 1; }
+export MOLE_UNINSTALL_MODE=1
+target="$container/Data/Documents/app_data/log/private"
+_MOLE_SAFE_CLEAN_BOUND_PATH=""
+_MOLE_SAFE_CLEAN_EXPECTED_PARENT=""
+_MOLE_SAFE_CLEAN_EXPECTED_PARENT_ID=""
+_MOLE_SAFE_CLEAN_EXPECTED_TARGET_ID=""
+guard_rc=0
+_wechat_container_delete_guard_allows "$target" || guard_rc=$?
+if [[ $guard_rc -eq 0 ]]; then
+    safe_remove "$target" true 1 "" \
+        "$_MOLE_SAFE_CLEAN_EXPECTED_PARENT" \
+        "$_MOLE_SAFE_CLEAN_EXPECTED_PARENT_ID" \
+        "$_MOLE_SAFE_CLEAN_EXPECTED_TARGET_ID" || true
+fi
+printf 'GUARD:%s EXISTS:%s\n' "$guard_rc" \
+    "$(test -f "$outside/Documents/app_data/log/private" && echo yes || echo no)"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"GUARD:1 EXISTS:yes"* ]]
+}
+
+@test "WeChat delete guard binds an exact in-container candidate" {
+    local iso="$HOME/iso-wechat-binding"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+cache_root="$HOME/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/log"
+target_path="$cache_root/wechat.log"
+mkdir -p "$cache_root"
+touch "$target_path"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+_wechat_container_process_guard_allows() { return 0; }
+_MOLE_SAFE_CLEAN_BOUND_PATH=""
+_MOLE_SAFE_CLEAN_EXPECTED_PARENT=""
+_MOLE_SAFE_CLEAN_EXPECTED_PARENT_ID=""
+_MOLE_SAFE_CLEAN_EXPECTED_TARGET_ID=""
+_wechat_container_delete_guard_allows "$target_path"
+printf 'BOUND:%s\nPARENT:%s\n' \
+    "$_MOLE_SAFE_CLEAN_BOUND_PATH" "$_MOLE_SAFE_CLEAN_EXPECTED_PARENT"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"BOUND:$iso/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/log/wechat.log"* ]] || return 1
+    [[ "$output" == *"PARENT:$iso/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/log"* ]]
+}
+
+@test "obsolete false and nonboolean values preserve installed extensions" {
+    local ext_root="$HOME/.vscode/extensions"
+    mkdir -p "$ext_root/keep-false" "$ext_root/keep-string" "$ext_root/remove-true"
+    printf '%s\n' '{"keep-false":false,"keep-string":"true","remove-true":true}' > "$ext_root/.obsolete"
+    run_editor_extension_cleanup
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLEAN:$ext_root/remove-true"* ]] || return 1
+    [[ "$output" != *"CLEAN:$ext_root/keep-"* ]] || return 1
 }

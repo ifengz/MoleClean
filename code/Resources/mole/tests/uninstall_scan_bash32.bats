@@ -87,15 +87,10 @@ PLIST
 
 	# Seed the warm metadata cache so that the one discovered app
 	# (TestApp.app) is a cache hit: matching mtime, non-empty bundle id
-	# and display name are the conditions the awk classifier and
+	# and display name, plus a matching language signature, are the conditions
+	# the awk classifier and
 	# use_cached_scan_metadata require for the cached branch to "stick".
 	app_mtime="$(stat -f %m "$apps_root/TestApp.app")"
-	cache_dir="$HOME/.cache/mole"
-	mkdir -p "$cache_dir"
-	printf '%s|%s|4|0|0|com.test.TestApp|TestApp\n' \
-		"$apps_root/TestApp.app" "$app_mtime" \
-		> "$cache_dir/uninstall_app_metadata_v2"
-
 	done_marker="$HOME/scan.done"
 
 	# The bug not only emits "unbound variable"; the spinner subshell can
@@ -107,12 +102,19 @@ PLIST
 	(
 		env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
 			MOLE_TEST_NO_AUTH=1 \
-			APPS_ROOT="$apps_root" SRC_PATH="$src" \
+			APPS_ROOT="$apps_root" APP_MTIME="$app_mtime" SRC_PATH="$src" \
 			/bin/bash --noprofile --norc <<'EOF' > "$HOME/scan.out" 2> "$HOME/scan.err"
 set -euo pipefail
 
 # shellcheck source=/dev/null
 source "$SRC_PATH"
+
+# Seed the production cache schema after sourcing so the language signature
+# exactly matches the preference snapshot used by this scan.
+mkdir -p "$MOLE_UNINSTALL_META_CACHE_DIR"
+printf '%s|%s|4|0|0|com.test.TestApp|TestApp|%s\n' \
+	"$APPS_ROOT/TestApp.app" "$APP_MTIME" "$MOLE_UNINSTALL_LANGUAGE_SIGNATURE" \
+	> "$MOLE_UNINSTALL_META_CACHE_FILE"
 
 # Skip the real pkgutil receipt scan: it walks every package on the host and
 # can take longer than this test's watchdog on machines with large receipt
@@ -127,8 +129,13 @@ uninstall_print_app_search_dirs() { printf '%s\n' "$APPS_ROOT"; }
 # Bundle-id resolution would otherwise call /usr/bin/mdls and reject our
 # placeholder Info.plist. The cached branch only needs an echo-through here.
 uninstall_resolve_eligible_bundle_id() { printf '%s\n' "${2:-${1##*/}}"; }
+uninstall_resolve_display_name() {
+	: > "$HOME/name-resolved"
+	printf 'TestApp\n'
+}
 
 scan_applications > /dev/null
+[[ ! -e "$HOME/name-resolved" ]] || exit 2
 EOF
 		: > "$done_marker"
 	) &
@@ -161,6 +168,131 @@ EOF
 	# the inverted status explicitly so the assertion is portable.
 	run grep -q 'unbound variable' "$HOME/scan.err"
 	[ "$status" -ne 0 ]
+}
+
+@test "scan_applications refreshes only a cached localized name when AppleLanguages changes (#1520)" {
+	src="$HOME/uninstall_source.sh"
+	sourceable_uninstall_sh "$src"
+
+	apps_root="$HOME/Applications"
+	app_path="$apps_root/VideoFusion-macOS.app"
+	create_test_app_bundle "$app_path" "com.example.VideoFusion" "VideoFusion-macOS"
+	/usr/libexec/PlistBuddy -c "Add :CFBundleDevelopmentRegion string en" \
+		"$app_path/Contents/Info.plist"
+	mkdir -p "$app_path/Contents/Resources/en.lproj"
+	printf '"CFBundleDisplayName" = "VideoFusion";\n' \
+		> "$app_path/Contents/Resources/en.lproj/InfoPlist.strings"
+	app_mtime="$(stat -f %m "$app_path")"
+
+	bin_dir="$HOME/bin"
+	mkdir -p "$bin_dir"
+	cat > "$bin_dir/defaults" <<'EOF'
+#!/bin/sh
+printf '(\n    "en-CN",\n    "zh-Hans-CN"\n)\n'
+EOF
+	chmod +x "$bin_dir/defaults"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$bin_dir:$PATH" \
+		MOLE_TEST_NO_AUTH=1 APPS_ROOT="$apps_root" APP_PATH="$app_path" \
+		APP_MTIME="$app_mtime" SRC_PATH="$src" \
+		/bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$SRC_PATH"
+
+uninstall_print_app_search_dirs() { printf '%s\n' "$APPS_ROOT"; }
+pkg_receipt_nonstandard_app_paths() { return 0; }
+uninstall_quick_app_size_kb() { printf '0\n'; }
+uninstall_inline_du_size_kb() { printf '0\n'; }
+start_uninstall_metadata_refresh() { :; }
+
+mkdir -p "$MOLE_UNINSTALL_META_CACHE_DIR"
+printf '%s|%s|4096|1700000000|1700000001|com.example.VideoFusion|剪映专业版|old-language-signature\n' \
+	"$APP_PATH" "$APP_MTIME" > "$MOLE_UNINSTALL_META_CACHE_FILE"
+
+apps_file=$(scan_applications)
+result=$(cat "$apps_file")
+[[ "$result" == *"|$APP_PATH|VideoFusion|com.example.VideoFusion|4.2MB|"* ]] || {
+	printf 'unexpected scan result: %s\n' "$result" >&2
+	exit 1
+}
+[[ "$result" != *"剪映专业版"* ]] || exit 2
+
+IFS='|' read -r cached_path cached_mtime cached_size cached_epoch cached_updated \
+	cached_bundle cached_name cached_language < "$MOLE_UNINSTALL_META_CACHE_FILE"
+[[ "$cached_path" == "$APP_PATH" ]] || exit 3
+[[ "$cached_mtime" == "$APP_MTIME" ]] || exit 4
+[[ "$cached_size" == "4096" ]] || exit 5
+[[ "$cached_epoch" == "1700000000" ]] || exit 6
+[[ "$cached_updated" == "1700000001" ]] || exit 7
+[[ "$cached_bundle" == "com.example.VideoFusion" ]] || exit 8
+[[ "$cached_name" == "VideoFusion" ]] || exit 9
+[[ -n "$cached_language" && "$cached_language" != "old-language-signature" ]] || exit 10
+EOF
+
+	[ "$status" -eq 0 ] || {
+		echo "$output"
+		return 1
+	}
+}
+
+@test "app discovery treats the app suffix case-insensitively without admitting nested bundles" {
+	src="$HOME/uninstall_source.sh"
+	sourceable_uninstall_sh "$src"
+
+	apps_root="$HOME/Applications"
+	mkdir -p \
+		"$apps_root/Upper.APP" \
+		"$apps_root/Mixed.App" \
+		"$apps_root/Lower.app" \
+		"$apps_root/Receipt.APP" \
+		"$apps_root/Outer.APP/Nested.app"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
+		APPS_ROOT="$apps_root" SRC_PATH="$src" \
+		/bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$SRC_PATH"
+
+uninstall_print_app_search_dirs() { printf '%s\n' "$APPS_ROOT"; }
+pkg_receipt_nonstandard_app_paths() { printf '%s\n' "$APPS_ROOT/Receipt.APP"; }
+get_file_mtime() { printf '1\n'; }
+
+discovered_file="$HOME/discovered"
+: > "$discovered_file"
+_scan_discover_apps
+cat "$discovered_file"
+EOF
+
+	[ "$status" -eq 0 ] || return 1
+	[ "$(printf '%s\n' "$output" | grep -cF "$apps_root/Upper.APP|Upper|1")" -eq 1 ] || return 1
+	[ "$(printf '%s\n' "$output" | grep -cF "$apps_root/Mixed.App|Mixed|1")" -eq 1 ] || return 1
+	[ "$(printf '%s\n' "$output" | grep -cF "$apps_root/Lower.app|Lower|1")" -eq 1 ] || return 1
+	[ "$(printf '%s\n' "$output" | grep -cF "$apps_root/Receipt.APP|Receipt|1")" -eq 1 ] || return 1
+	[[ "$output" != *"Outer.APP/Nested.app"* ]]
+}
+
+@test "bundle dedupe ranks direct mixed-case app paths before user copies" {
+	src="$HOME/uninstall_source.sh"
+	sourceable_uninstall_sh "$src"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" SRC_PATH="$src" \
+		/bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$SRC_PATH"
+
+scan_raw_file="$HOME/raw"
+printf '%s\n' \
+	"$HOME/Applications/Shared.APP|Shared|com.example.shared|1|1" \
+	"/Applications/Shared.APP|Shared|com.example.shared|1|1" \
+	> "$scan_raw_file"
+
+_scan_dedupe_bundle_ids
+cat "$scan_raw_file"
+EOF
+
+	[ "$status" -eq 0 ] || return 1
+	[ "$(printf '%s\n' "$output" | grep -cF 'com.example.shared')" -eq 1 ] || return 1
+	[[ "$output" == "/Applications/Shared.APP|Shared|com.example.shared|1|1" ]]
 }
 
 @test "scan_applications surfaces inline physical app size before deferred refresh (#1126)" {
@@ -207,7 +339,7 @@ EOF
 		/bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$SRC_PATH"
-[[ "$MOLE_UNINSTALL_META_CACHE_FILE" == */uninstall_app_metadata_v2 ]]
+[[ "$MOLE_UNINSTALL_META_CACHE_FILE" == */uninstall_app_metadata_v3 ]]
 EOF
 
 	[ "$status" -eq 0 ]
@@ -526,7 +658,7 @@ MOCK
 	# The copy must rename the load guard too: common.sh already sourced the
 	# real file, and the readonly guard would silently keep the original
 	# function, turning this test into a no-op against the wrong code.
-	sed -e "s|/usr/local/\*.app|$HOME/usr-local/*.app|g" \
+	sed -e "s|/usr/local/|$HOME/usr-local/|g" \
 		-e 's|MOLE_PKG_RECEIPTS_LOADED|MOLE_PKG_RECEIPTS_TEST_LOADED|g' \
 		"$PROJECT_ROOT/lib/core/pkg_receipts.sh" > "$HOME/pkg_receipts_test.sh"
 
@@ -548,6 +680,48 @@ EOF
 	}
 	[[ "$output" != *"unbound variable"* ]] || return 1
 	[[ "$output" == *"RC=0 OUT=$HOME/usr-local/Example.app"* ]] || return 1
+}
+
+@test "receipt discovery preserves mixed-case app bundles in complete scans" {
+	local mock_bin="$HOME/mock-pkgutil-mixed-app"
+	mkdir -p "$mock_bin" \
+		"$HOME/usr-local/Direct.APP" \
+		"$HOME/usr-local/Nested.App/Contents"
+	cat > "$mock_bin/pkgutil" << MOCK
+#!/bin/bash
+case "\$1" in
+    --pkgs) printf 'com.example.mixed-apps\n' ;;
+    --files)
+        printf '%s\n' \
+            '${HOME#/}/usr-local/Direct.APP' \
+            '${HOME#/}/usr-local/Nested.App/Contents/Info.plist'
+        ;;
+esac
+MOCK
+	chmod +x "$mock_bin/pkgutil"
+
+	# Redirect the fixed production prefix into the isolated HOME while keeping
+	# the real mixed-case parser and complete-scan contract under test.
+	sed -e "s|/usr/local/|$HOME/usr-local/|g" \
+		-e 's|MOLE_PKG_RECEIPTS_LOADED|MOLE_PKG_RECEIPTS_MIXED_TEST_LOADED|g' \
+		"$PROJECT_ROOT/lib/core/pkg_receipts.sh" > "$HOME/pkg_receipts_mixed_test.sh"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
+		PATH="$mock_bin:/usr/bin:/bin" \
+		MOLE_PKG_RECEIPT_CACHE_DISABLE=1 /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$HOME/pkg_receipts_mixed_test.sh"
+
+pkg_receipt_nonstandard_app_paths --require-complete
+EOF
+
+	[ "$status" -eq 0 ] || {
+		echo "$output"
+		return 1
+	}
+	[[ "$output" == *"$HOME/usr-local/Direct.APP"* ]] || return 1
+	[[ "$output" == *"$HOME/usr-local/Nested.App"* ]] || return 1
 }
 
 @test "a newly installed receipt invalidates the cached complete answer" {
@@ -576,7 +750,7 @@ MOCK
 	chmod +x "$mock_bin/pkgutil"
 	printf 'com.example.first\n' > "$pkgs_file"
 
-	sed -e "s|/usr/local/\*.app|$HOME/usr-local/*.app|g" \
+	sed -e "s|/usr/local/|$HOME/usr-local/|g" \
 		-e 's|MOLE_PKG_RECEIPTS_LOADED|MOLE_PKG_RECEIPTS_TEST_LOADED|g' \
 		"$PROJECT_ROOT/lib/core/pkg_receipts.sh" > "$HOME/pkg_receipts_cache_test.sh"
 
