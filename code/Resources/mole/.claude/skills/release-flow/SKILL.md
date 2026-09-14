@@ -23,8 +23,10 @@ At the start of any release-flavored task, restate which channels this run will 
 2. `SECURITY_AUDIT.md` opening line reflects the new version and date.
 3. `git status -s` is empty or only contains intentionally staged release work.
 4. `git log origin/main..HEAD --oneline` shows only commits you intend to ship.
-5. `./scripts/check.sh --format` and `MOLE_TEST_NO_AUTH=1 MOLE_TEST_JOBS=2 BATS_FORMATTER=tap ./scripts/test.sh` both exit 0.
-6. `go test ./cmd/...` and `make build` both pass.
+5. `./scripts/check.sh --format` and `TERM=xterm-256color MOLE_TEST_NO_AUTH=1 MOLE_TEST_JOBS=2 BATS_FORMATTER=tap ./scripts/test.sh` both exit 0.
+6. `go test ./...` and `make build` both pass.
+
+Use the Go version declared in `go.mod` for local release builds, matching `actions/setup-go` in CI, then run `scripts/check_release_minos.sh` on both architectures. A newer local Go can raise the minimum macOS version even with `CGO_ENABLED=0`; Go 1.27 produces macOS 13 binaries where this release's Go 1.25 toolchain preserves macOS 12. Rebuild with the declared toolchain instead of relaxing the minimum-OS gate.
 
 ## Tag and publish
 
@@ -36,7 +38,7 @@ git push origin V<version>
 
 Wait for the workflow to finish. The workflow creates the release with assets but `generate_release_notes: false`, so notes must be added in a follow-up step.
 
-After the workflow finishes, verify the release assets before announcing anything: `gh release view V<version> --json assets --jq '.assets[].name'` must list both architecture binaries AND `SHA256SUMS`. Install verification is fail-closed, so a release without a readable `SHA256SUMS` asset makes every install and `mo update` abort by design; a missing checksums file is a release blocker, not a cosmetic gap.
+After the workflow finishes, verify the release assets before announcing anything: `gh release view V<version> --json assets --jq '.assets[].name'` must list all four `analyze-`/`status-darwin-{amd64,arm64}` binaries, both `binaries-darwin-*.tar.gz` Homebrew tarballs, AND `SHA256SUMS`. Install verification is fail-closed, so a release without a readable `SHA256SUMS` asset makes every install and `mo update` abort by design; a missing checksums file is a release blocker, not a cosmetic gap.
 
 Then run a **script self-update smoke** before publishing notes or announcing: install the previous stable release through the script channel, run `mo update`, and confirm `mo --version` prints the candidate version. Script-installed clients execute the new tag's `install.sh`, so this is the only gate that exercises their real upgrade path; the pre-flight suite cannot cover it before the release exists. Homebrew is a separate downstream gate: verify it only after the core formula has updated, and never treat a script-channel smoke as proof that Homebrew is ready. If the script smoke fails, pull the release (see the pulling-and-re-releasing pitfall) before anyone is told to update.
 
@@ -55,6 +57,6 @@ Format rules (impact ordering, command existence checks, icon semantics, no em d
 - **`gh release create` conflicts with the workflow-created release**: the workflow already creates the release on tag push, so post-tag note publishing must use `gh release edit`, never `create`.
 - **Tag prefix is case-sensitive**: `release.yml` filters on `'V*'`. A lowercase `v1.38.0` tag will not trigger the workflow.
 - **Old clients fetch `install.sh` from the release tag, not from main**: a self-updating Mole downloads `raw.githubusercontent.com/tw93/mole/V<tag>/install.sh`, and tag content is immutable. An installer/updater bug therefore reaches existing stable users only through a new tag; fixing main changes Nightly but does not repair an already published stable updater.
-- **Pulling and re-releasing a version**: `gh release delete V<old> --cleanup-tag` removes the release and remote tag. Delete the local tag, close the superseded Homebrew core PR with a one-line supersede comment before pushing the replacement tag (an open PR for the same formula can block `brew bump-formula-pr`), then bump `VERSION` and `SECURITY_AUDIT.md`, commit `release: V<new>`, tag, and run the normal publish flow. The Homebrew core PR regenerates on the new tag.
+- **Pulling and re-releasing a version**: `gh release delete V<old> --cleanup-tag` removes the release and remote tag. Delete the local tag, close the superseded Homebrew core PR with a one-line supersede comment before pushing the replacement tag (`release.yml` refuses to overwrite an existing `mole-<version>` fork branch and reuses, rather than recreates, an open PR for the same head), then bump `VERSION` and `SECURITY_AUDIT.md`, commit `release: V<new>`, tag, and run the normal publish flow. The Homebrew core PR regenerates on the new tag.
 
 When release work touches Shell code or tests, read `.claude/skills/bugs/references/shell-and-test-pitfalls.md` for Bash 3.2 arrays, heredoc input, mock bypasses, and CI-runner quirks.

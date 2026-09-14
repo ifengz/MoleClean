@@ -37,6 +37,14 @@ if [[ -z "${MOLE_TIMEOUTS_LOADED:-}" ]]; then
     source "$_MOLE_CORE_DIR/timeouts.sh"
 fi
 
+# Keep the removal-timeout summary actionable: record which path ran out of
+# budget so the closing note can name it instead of a bare count.
+_mole_record_removal_timeout_path() {
+    local path="$1"
+    MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS="${MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS:+$MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS
+}$path"
+}
+
 # Bound production sudo commands while keeping shell-function mocks observable
 # in tests. Timeout behavior itself must use a PATH stub so it exercises the
 # same external-command branch that users run.
@@ -930,6 +938,24 @@ _mole_is_critical_deletion_path() {
     return 1
 }
 
+# True when path is a direct child of the invoking user's Trash. Emptying Trash
+# is an explicit discard contract: cleanup protection for input methods,
+# keyboards, and similar names still applies to live Library paths, but not to
+# items the user or uninstall already moved into ~/.Trash.
+_mole_is_user_trash_top_level_item() {
+    local path="$1"
+    [[ -n "$path" && "$path" == /* ]] || return 1
+
+    local user_home="${HOME:-}"
+    [[ -n "$user_home" && "$user_home" == /* ]] || return 1
+
+    local policy_path
+    policy_path=$(_mole_normalize_deletion_policy_path "$path")
+
+    local trash_dir="${user_home%/}/.Trash"
+    [[ "${policy_path%/*}" == "$trash_dir" ]]
+}
+
 # Validate path for deletion (absolute, no traversal, not system dir)
 validate_path_for_deletion() {
     local path="$1"
@@ -1131,7 +1157,9 @@ validate_path_for_deletion() {
 
     # Check if path is protected (keychains, system settings, etc)
     if declare -f should_protect_path > /dev/null 2>&1; then
-        if should_protect_path "$policy_path"; then
+        if _mole_is_user_trash_top_level_item "$policy_path"; then
+            :
+        elif should_protect_path "$policy_path"; then
             if [[ "${MO_DEBUG:-0}" == "1" ]]; then
                 log_warning "Path validation: protected path skipped: $policy_path"
             fi
@@ -1500,6 +1528,16 @@ safe_remove() {
         fi
     fi
 
+    # A caller-specific final guard may perform process or metadata probes.
+    # Rebind the original object once more after that work so a replacement
+    # during the guard cannot reach rm under the identity checked above.
+    if [[ -n "$expected_parent" ]] && ! _mole_path_matches_identity \
+        "$path" "$expected_parent" "$expected_parent_id" "$expected_target_id"; then
+        debug_log "Refusing removal after path identity changed during the final sink guard: $path"
+        log_operation "${MOLE_CURRENT_COMMAND:-clean}" "SKIPPED" "$path" "identity changed"
+        return 1
+    fi
+
     if [[ -n "$container_probe_parent" ]] && ! _mole_path_matches_identity \
         "$path" "$container_probe_parent" "$container_probe_parent_id" \
         "$container_probe_target_id"; then
@@ -1522,13 +1560,13 @@ safe_remove() {
     local rm_exit=0
     local section_deadline_spent=0
     if declare -F rm > /dev/null 2>&1; then
-        error_msg=$(rm -rf "$path" 2>&1) || rm_exit=$? # safe_remove
+        error_msg=$(rm -rf "$path" 2>&1) || rm_exit=$? # SAFE: safe_remove validated and rebound this exact target above
     else
         local rm_timeout=""
         rm_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_DISK_VERIFY_SEC" \
             "$deadline_seconds") || rm_exit=$?
         if [[ $rm_exit -eq 0 ]]; then
-            error_msg=$(run_with_timeout "$rm_timeout" rm -rf "$path" < /dev/null 2>&1) || rm_exit=$? # safe_remove
+            error_msg=$(run_with_timeout "$rm_timeout" rm -rf "$path" < /dev/null 2>&1) || rm_exit=$? # SAFE: safe_remove validated and rebound this exact target above
         else
             # The section's own wall-clock budget ran out, so rm never started.
             section_deadline_spent=1
@@ -1548,6 +1586,7 @@ safe_remove() {
             # failed removal, not a user interrupt: count it and keep going so
             # one slow cache never cancels the remaining cleanup.
             MOLE_CLEAN_REMOVAL_TIMEOUTS=$((${MOLE_CLEAN_REMOVAL_TIMEOUTS:-0} + 1))
+            _mole_record_removal_timeout_path "$path"
         fi
         return 124
     fi
@@ -1942,7 +1981,7 @@ safe_sudo_remove() {
         "$deadline_seconds") || ret=$?
     if [[ $ret -eq 0 ]]; then
         output=$(_mole_bounded_sudo "$remove_timeout" \
-            -n rm -rf "$path" < /dev/null 2>&1) || ret=$? # safe_remove
+            -n rm -rf "$path" < /dev/null 2>&1) || ret=$? # SAFE: safe_sudo_remove validated the exact immutable-ancestor target above
     else
         # The section's own wall-clock budget ran out, so rm never started.
         section_deadline_spent=1
@@ -1962,6 +2001,7 @@ safe_sudo_remove() {
         else
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "removal timed out"
             MOLE_CLEAN_REMOVAL_TIMEOUTS=$((${MOLE_CLEAN_REMOVAL_TIMEOUTS:-0} + 1))
+            _mole_record_removal_timeout_path "$path"
         fi
         return 124
     fi
@@ -2264,7 +2304,7 @@ _mole_path_is_immediate_child_of() {
 _mole_path_is_application_bundle() {
     local path="${1%/}"
     _mole_path_is_immediate_child_of "$path" "/Applications" &&
-        [[ "${path##*/}" == *.app ]]
+        [[ "${path##*/}" == *.[aA][pP][pP] ]]
 }
 
 # Finder and third-party Trash helpers can fail on app bundles and TCC-managed
@@ -2756,8 +2796,11 @@ _mole_snapshot_path_identity() {
     physical_parent=$(cd -P "$lexical_parent" 2> /dev/null && pwd -P) || return 1
     local parent_id=""
     local target_id=""
-    parent_id=$($STAT_BSD -f '%d:%i' "$physical_parent" 2> /dev/null || true)
-    target_id=$($STAT_BSD -f '%d:%i' "$path" 2> /dev/null || true)
+    local identities=""
+    identities=$("$STAT_BSD" -f '%d:%i' "$physical_parent" "$path" 2> /dev/null) || return 1
+    [[ "$identities" == *$'\n'* ]] || return 1
+    parent_id="${identities%%$'\n'*}"
+    target_id="${identities#*$'\n'}"
     [[ "$parent_id" =~ ^[0-9]+:[0-9]+$ && "$target_id" =~ ^[0-9]+:[0-9]+$ ]] || return 1
 
     _MOLE_PATH_SNAPSHOT_PARENT="$physical_parent"
@@ -3485,7 +3528,7 @@ get_path_size_kb() {
     # on the same physical-size basis as the directory fallback; logical size
     # can be much larger for APFS-cloned bundles and must not be mixed into the
     # same total as `du` results (#1404).
-    if [[ "$path" == *.app || "$path" == *.app/ ]]; then
+    if [[ "$path" == *.[aA][pP][pP] || "$path" == *.[aA][pP][pP]/ ]]; then
         local mdls_size
         local mdls_timeout=""
         local mdls_deadline_rc=0

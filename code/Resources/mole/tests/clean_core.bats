@@ -15,17 +15,11 @@ setup_file() {
     export MOLE_TEST_MODE
 
     # Two tests below run the real pipeline (MOLE_TEST_MODE=0), which otherwise
-    # scans the host: du -sk over every mounted CoreSimulator runtime volume
-    # plus a full lsregister -dump. That cost ~32s per test and scaled with
-    # whatever Xcode and LaunchServices happened to hold, which made this file
-    # the critical path of the whole CI suite. Neither scan feeds an assertion
-    # here, so point both at nothing. The paths stay absent: setup() wipes
-    # $HOME between tests.
-    MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT="$HOME/absent-sim-runtime-volumes"
-    MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT="$HOME/absent-sim-runtime-cryptex"
+    # scans the host: a full lsregister -dump. That cost seconds per test and
+    # scaled with whatever LaunchServices happened to hold, which made this
+    # file the critical path of the whole CI suite. The scan feeds no
+    # assertion here, so point it at nothing.
     MOLE_LSREGISTER_PATH=""
-    export MOLE_XCODE_SIM_RUNTIME_VOLUMES_ROOT
-    export MOLE_XCODE_SIM_RUNTIME_CRYPTEX_ROOT
     export MOLE_LSREGISTER_PATH
 
     mkdir -p "$HOME"
@@ -868,12 +862,72 @@ SCRIPT
     [[ "$output" == *"SYSTEM_CLEAN=false"* ]]
 }
 
-@test "cloud and office timeout path uses helper function instead of bash -c" {
-    run /bin/bash -c "grep -Eq 'run_with_shell_timeout 300 run_cloud_and_office_cleanup' '$PROJECT_ROOT/bin/clean.sh'"
+@test "cloud and office cleanup uses cooperative section budget instead of outer killer" {
+    run /bin/bash -c "grep -Eq 'MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC' '$PROJECT_ROOT/lib/core/timeouts.sh'"
+    [ "$status" -eq 0 ]
+
+    run /bin/bash -c "grep -Eq '_run_cleanup_step run_cloud_and_office_cleanup' '$PROJECT_ROOT/bin/clean.sh'"
     [ "$status" -eq 0 ]
 
     run /bin/bash -c "! grep -Eq 'run_with_timeout 300[[:space:]]+bash[[:space:]]+-c' '$PROJECT_ROOT/bin/clean.sh'"
     [ "$status" -eq 0 ]
+}
+
+@test "cloud and office section budget continues later cleanup sections (#1513)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 \
+        MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC=0 MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+
+DRY_RUN=false
+SYSTEM_CLEAN=false
+EXTERNAL_VOLUME_TARGET=""
+WHITELIST_PATTERNS=()
+WHITELIST_WARNINGS=()
+
+check_tcc_permissions() { :; }
+start_section() { :; }
+end_section() { :; }
+log_operation_session_end() { :; }
+clean_user_essentials() { :; }
+clean_finder_metadata() { :; }
+clean_app_caches() { :; }
+clean_browsers() { :; }
+clean_cloud_storage() { :; }
+clean_office_applications() { echo "OFFICE_SHOULD_NOT_RUN"; return 0; }
+clean_user_gui_applications() { :; }
+clean_virtualization_tools() { :; }
+clean_application_support_logs() { :; }
+clean_orphaned_app_data() { :; }
+clean_orphaned_system_services() { :; }
+clean_orphaned_container_stubs() { :; }
+show_user_launch_agent_hint_notice() { :; }
+clean_apple_silicon_caches() { :; }
+clean_cached_device_firmware() { :; }
+clean_time_machine_failed_backups() { :; }
+check_large_file_candidates() { :; }
+show_project_artifact_hint_notice() { :; }
+
+developer_tools_called=false
+clean_developer_tools() {
+    developer_tools_called=true
+    return 0
+}
+
+perform_cleanup
+printf 'DEV=%s\n' "$developer_tools_called"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"DEV=true"* ]] || return 1
+    [[ "$output" == *"Cleanup complete"* ]] || return 1
+    [[ "$output" != *"Cleanup cancelled"* ]] || return 1
+    [[ "$output" == *"time limit reached, skipped remaining items"* ]] || return 1
+    [[ "$output" != *"OFFICE_SHOULD_NOT_RUN"* ]] || return 1
 }
 
 @test "mo clean summary separates tracked cleanup from free space change" {
@@ -913,7 +967,6 @@ check_tcc_permissions() { :; }
 start_section() { :; }
 end_section() { :; }
 log_operation_session_end() { :; }
-run_with_shell_timeout() { shift; "$@"; }
 
 clean_user_essentials() {
     total_size_cleaned=$((total_size_cleaned + 1000000))
@@ -1087,7 +1140,7 @@ touch "$candidate"
 record_timeout_candidate() {
     record_dry_run_cleanup_target "$candidate" 0 1 false
 }
-run_with_shell_timeout 5 record_timeout_candidate < /dev/null
+record_timeout_candidate
 
 render_clean_preview_from_ledger
 printf 'PARTIAL=%s\n' "$DRY_RUN_TOTAL_PARTIAL"
@@ -1536,7 +1589,7 @@ EOF
 }
 
 @test "start_section recycles an idle section header in place on a TTY" {
-    if ! /usr/bin/script -q /dev/null /bin/true > /dev/null 2>&1; then
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
         skip "script cannot allocate a TTY in this environment"
     fi
 
@@ -1563,7 +1616,7 @@ EOF
 }
 
 @test "log_success rows mark section activity so headers keep their blank separator" {
-    if ! /usr/bin/script -q /dev/null /bin/true > /dev/null 2>&1; then
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
         skip "script cannot allocate a TTY in this environment"
     fi
 
@@ -1659,24 +1712,6 @@ EOF
         '
     [[ "$status" -eq 0 ]] || return 1
     [[ "$output" == "Xcode, Simulator, Codex" ]]
-}
-
-@test "timeout worker cleanup families reach the parent summary" {
-    # shellcheck disable=SC2016  # inner bash expands these from its environment
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 \
-        /bin/bash --noprofile --norc -c '
-            source "$PROJECT_ROOT/bin/clean.sh"
-            DEFERRED_CLEANUP_FAMILIES=()
-            DEFERRED_CLEANUP_FAMILIES_FILE=$(create_temp_file)
-            run_with_shell_timeout 5 defer_cleanup_family "Dropbox"
-            sync_deferred_cleanup_families
-            format_deferred_cleanup_families
-        '
-    [[ "$status" -eq 0 ]] || {
-        echo "$output"
-        return 1
-    }
-    [[ "$output" == "Dropbox" ]]
 }
 
 @test "report-only clean sections omit the category total" {

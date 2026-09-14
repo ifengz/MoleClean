@@ -549,6 +549,67 @@ EOF
     [[ "$output" != *"osascript called"* ]]
 }
 
+@test "clean_trash reports skipped items instead of silent partial empty (#1517)" {
+    mkdir -p "$HOME/.Trash"
+    touch "$HOME/.Trash/one.tmp" "$HOME/.Trash/two.tmp"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+note_activity() { :; }
+is_path_whitelisted() { return 1; }
+debug_log() { :; }
+safe_remove() {
+    local target="$1"
+    [[ "$target" == *"/two.tmp" ]] && return 1
+    rm -f "$target"
+    return 0
+}
+
+clean_trash
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Trash · removed 1 items, 1 could not be removed"* ]] || return 1
+    [[ -e "$HOME/.Trash/two.tmp" ]]
+    [[ ! -e "$HOME/.Trash/one.tmp" ]]
+}
+
+@test "clean_trash removes input-method leftovers already in Trash (#1517)" {
+    rm -rf "$HOME/.Trash" # SAFE: reset this test's temporary HOME fixture before populating it
+    mkdir -p "$HOME/.Trash/Input Methods"
+    touch "$HOME/.Trash/com.sogou.inputmethod.sogou.plist"
+    touch "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+note_activity() { :; }
+is_path_whitelisted() { return 1; }
+debug_log() { :; }
+
+clean_trash
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Trash · emptied, 3 items"* ]] || return 1
+    [[ ! -e "$HOME/.Trash/com.sogou.inputmethod.sogou.plist" ]]
+    [[ ! -e "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist" ]]
+    [[ ! -d "$HOME/.Trash/Input Methods" ]]
+}
+
 @test "clean_user_essentials keeps Mole runtime logs while cleaning other user logs" {
     mkdir -p "$HOME/Library/Logs/mole"
     mkdir -p "$HOME/Library/Logs/OtherApp"
@@ -640,6 +701,27 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"Autosave information"* ]] || return 1
     [[ "$output" != *"Library/Autosave Information"* ]]
+}
+
+@test "clean_app_caches does not clean Calendar cache (#1508)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+stop_section_spinner() { :; }
+start_section_spinner() { :; }
+safe_clean() { echo "$2|$1"; }
+bytes_to_human() { echo "0B"; }
+note_activity() { :; }
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+clean_app_caches
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Calendar cache"* ]] || return 1
+    [[ "$output" != *"Library/Calendars/Calendar Cache"* ]]
 }
 
 @test "clean_app_caches includes additional Apple cache families" {
@@ -2443,4 +2525,220 @@ EOF
         echo "$derived_row"
         return 1
     }
+}
+
+@test "external volume cleanup discards a partial metadata scan before deletion" {
+    local test_home="$HOME/external-partial-scan"
+    local volume="$test_home/External"
+    local metadata_file="$volume/._partial"
+    mkdir -p "$volume"
+    touch "$metadata_file"
+
+    run env HOME="$test_home" PROJECT_ROOT="$PROJECT_ROOT" \
+        VOLUME="$volume" METADATA_FILE="$metadata_file" \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+
+DRY_RUN=false
+PROTECT_FINDER_METADATA=true
+MOLE_CURRENT_COMMAND=clean
+MOLE_CLEAN_CANCEL_STATUS=0
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+probe_mode=partial
+probe_status=124
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+clean_ds_store_tree() { :; }
+should_protect_path() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() { printf '1\n'; }
+mktemp_file() {
+    : > "$HOME/external-scan.list"
+    printf '%s\n' "$HOME/external-scan.list"
+}
+run_with_timeout() {
+    printf '%s\n' "$*" > "$HOME/find.trace"
+    printf '%s\0' "$METADATA_FILE"
+    if [[ "$probe_mode" == complete ]]; then
+        return 0
+    fi
+    return "$probe_status"
+}
+safe_remove() {
+    printf 'REMOVE:%s\n' "$1" >> "$HOME/remove.trace"
+    return 0
+}
+
+for probe_status in 7 124 130; do
+    MOLE_CLEAN_CANCEL_STATUS=0
+    files_cleaned=0
+    total_size_cleaned=0
+    total_items=0
+    rm -f "$HOME/remove.trace" # SAFE: exact test-owned trace file
+    set +e
+    clean_external_volume_target "$VOLUME" > "$HOME/partial.output" 2>&1
+    partial_rc=$?
+    set -e
+    expected_cancel=0
+    if [[ $probe_status -eq 124 || $probe_status -ge 128 ]]; then
+        expected_cancel=$probe_status
+    fi
+    printf 'PARTIAL_RC=%s CANCEL=%s FILES=%s\n' \
+        "$partial_rc" "$MOLE_CLEAN_CANCEL_STATUS" "$files_cleaned"
+    [[ $partial_rc -eq $probe_status ]] || exit 1
+    [[ "$MOLE_CLEAN_CANCEL_STATUS" -eq $expected_cancel ]] || exit 1
+    [[ "$files_cleaned" -eq 0 ]] || exit 1
+    [[ ! -e "$HOME/remove.trace" ]] || exit 1
+    [[ -f "$METADATA_FILE" ]] || exit 1
+done
+
+# Positive control: a complete producer hands the same candidate to the sink.
+probe_mode=complete
+MOLE_CLEAN_CANCEL_STATUS=0
+clean_external_volume_target "$VOLUME" > "$HOME/complete.output" 2>&1
+grep -Fq "REMOVE:$METADATA_FILE" "$HOME/remove.trace" || exit 1
+[[ "$files_cleaned" -eq 1 ]] || exit 1
+grep -Fq "$VOLUME/.TemporaryItems" "$HOME/find.trace" || exit 1
+grep -Fq "$VOLUME/.Trashes" "$HOME/find.trace" || exit 1
+grep -Fq -- '-prune' "$HOME/find.trace" || exit 1
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"PARTIAL_RC=7 CANCEL=0 FILES=0"* ]] || return 1
+    [[ "$output" == *"PARTIAL_RC=124 CANCEL=124 FILES=0"* ]] || return 1
+    [[ "$output" == *"PARTIAL_RC=130 CANCEL=130 FILES=0"* ]] || return 1
+}
+
+@test "external volume cleanup refuses a replacement mounted during cleanup" {
+    local test_home="$HOME/external-volume-swap"
+    local volume="$test_home/External"
+    mkdir -p "$volume/.Trashes"
+    touch "$volume/.Trashes/cache.tmp"
+
+    run env HOME="$test_home" PROJECT_ROOT="$PROJECT_ROOT" VOLUME="$volume" \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+
+DRY_RUN=false
+PROTECT_FINDER_METADATA=true
+MOLE_CURRENT_COMMAND=clean
+MOLE_CLEAN_CANCEL_STATUS=0
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+volume_generation=original
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+clean_ds_store_tree() { :; }
+should_protect_path() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() { printf '1\n'; }
+mktemp_file() {
+    : > "$HOME/external-scan.list"
+    printf '%s\n' "$HOME/external-scan.list"
+}
+run_with_timeout() { return 0; }
+_mole_snapshot_path_identity() {
+    _MOLE_PATH_SNAPSHOT_PARENT="${1%/*}"
+    _MOLE_PATH_SNAPSHOT_PARENT_ID="1:1"
+    _MOLE_PATH_SNAPSHOT_TARGET_ID="2:2"
+}
+_mole_path_matches_identity() {
+    [[ "$1" != "$VOLUME" || "$volume_generation" == original ]]
+}
+safe_remove() {
+    volume_generation=swapped
+    local guard="${_MOLE_SAFE_REMOVE_FINAL_GUARD:-}"
+    [[ "$guard" == "_mole_external_volume_final_guard" ]] || exit 1
+    if "$guard" "$1"; then
+        printf 'REMOVE:%s\n' "$1" >> "$HOME/remove.trace"
+    fi
+    return 1
+}
+
+clean_external_volume_target "$VOLUME"
+[[ ! -e "$HOME/remove.trace" ]] || exit 1
+[[ "$files_cleaned" -eq 0 ]] || exit 1
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+}
+
+@test "external volume scan completes past root-owned metadata trees" {
+    local test_home="$HOME/external-owned-volume"
+    local volume="$test_home/External"
+    mkdir -p "$volume/.Spotlight-V100/Store-V2" "$volume/.fseventsd" \
+        "$volume/.DocumentRevisions-V100/staging" "$volume/Photos"
+    touch "$volume/Photos/._IMG_0001.jpg" "$volume/.Spotlight-V100/Store-V2/._index"
+    # Ownership-enabled volumes carry these as root-owned 700 directories.
+    chmod 000 "$volume/.Spotlight-V100/Store-V2" "$volume/.fseventsd" \
+        "$volume/.DocumentRevisions-V100/staging"
+
+    run env HOME="$test_home" PROJECT_ROOT="$PROJECT_ROOT" VOLUME="$volume" \
+        /bin/bash --noprofile --norc <<'EOF_INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+
+DRY_RUN=false
+PROTECT_FINDER_METADATA=true
+MOLE_CURRENT_COMMAND=clean
+MOLE_CLEAN_CANCEL_STATUS=0
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+clean_ds_store_tree() { :; }
+should_protect_path() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() { printf '1\n'; }
+# The sink call discards stdout, so trace to a file.
+safe_remove() { printf 'REMOVE:%s\n' "$1" >> "$HOME/remove.trace"; return 0; }
+
+# Negative control: an unpruned walk over the same tree fails on EACCES.
+control_rc=0
+find -P "$VOLUME" -xdev -type f -name '._*' > /dev/null 2>&1 || control_rc=$?
+echo "CONTROL_FIND_RC=$control_rc"
+
+rc=0
+clean_external_volume_target "$VOLUME" || rc=$?
+echo "RC=$rc CANCEL=$MOLE_CLEAN_CANCEL_STATUS FILES=$files_cleaned"
+cat "$HOME/remove.trace"
+EOF_INNER
+    chmod 755 "$volume/.Spotlight-V100/Store-V2" "$volume/.fseventsd" \
+        "$volume/.DocumentRevisions-V100/staging"
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"CONTROL_FIND_RC=1"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"RC=0 CANCEL=0 FILES=1"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"REMOVE:$volume/Photos/._IMG_0001.jpg"* ]] || return 1
+    [[ "$output" != *"REMOVE:$volume/.Spotlight-V100"* ]]
 }

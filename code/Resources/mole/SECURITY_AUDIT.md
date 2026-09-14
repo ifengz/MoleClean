@@ -1,6 +1,6 @@
 # Mole Security Audit
 
-This document describes the security-relevant behavior of the current `main` branch, updated for V1.53.0 on 2026-08-30. It is intended as a public description of Mole's safety boundaries, destructive-operation controls, release integrity signals, and known limitations.
+This document describes the security-relevant behavior of the current `main` branch, updated for V1.54.0 on 2026-09-13. It is intended as a public description of Mole's safety boundaries, destructive-operation controls, release integrity signals, and known limitations.
 
 ## Executive Summary
 
@@ -289,7 +289,7 @@ Repository-level signals include:
 - curated changelog-driven release notes for user-visible changes
 - published SHA-256 checksums for release assets
 - GitHub artifact attestations for release assets
-- install-time verification of the GitHub Actions build-provenance attestation: `install.sh` runs `gh attestation verify` (with `--deny-self-hosted-runners`) on the downloaded asset when the GitHub CLI is available, and a mismatch is treated as fatal before checksums are read. This moves attestation from a release-side artifact to an install-side check.
+- install-time verification of the GitHub Actions build-provenance attestation: `install.sh` runs `gh attestation verify` scoped to the exact `tw93/Mole` repository (with `--deny-self-hosted-runners`) on the downloaded asset when the GitHub CLI is available, and a mismatch is treated as fatal before checksums are read. This moves attestation from a release-side artifact to an install-side check.
 
 These controls do not eliminate all supply-chain risk, but they make release changes easier to review and verify.
 

@@ -26,8 +26,8 @@ These should already be true if the tag was pushed correctly. Confirm before pub
 - `grep '^VERSION=' mole` matches `<version>`.
 - `SECURITY_AUDIT.md` opening line reflects the new version and date.
 - `./scripts/check.sh --format` clean.
-- `MOLE_TEST_NO_AUTH=1 MOLE_TEST_JOBS=2 BATS_FORMATTER=tap ./scripts/test.sh` exits 0.
-- `go test ./cmd/...` and `make build` pass.
+- `TERM=xterm-256color MOLE_TEST_NO_AUTH=1 MOLE_TEST_JOBS=2 BATS_FORMATTER=tap ./scripts/test.sh` exits 0.
+- `go test ./...` and `make build` pass.
 
 If any fail, stop. The notes can wait; a bad release tag cannot.
 
