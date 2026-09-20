@@ -1775,11 +1775,11 @@ clean_browsers() {
             clean_service_worker_cache "Arc" "${_arc_profile%/}/Service Worker/CacheStorage"
         done
     fi
-    # Dia Browser. company.thebrowser.dia only holds Sentry crash state; the real
-    # caches are the Chromium ones under ~/Library/Caches/Dia/User Data (HTTP and
-    # code cache) and ~/Library/Application Support/Dia/User Data (GPU and CRX
-    # caches). Dia has no ShaderCache / GrShaderCache / DawnCache / Crashpad tree
-    # like Arc, so those rows are intentionally absent.
+    # Dia Browser. The bundle-ID cache can hold Sentry state and Sparkle updates;
+    # should_protect_path keeps the Sparkle directory out of this wildcard sweep.
+    # Chromium caches live under ~/Library/Caches/Dia/User Data (HTTP and code)
+    # and ~/Library/Application Support/Dia/User Data (GPU and CRX).
+    # Only the observed cache leaves are listed below, not Arc's full layout.
     safe_clean ~/Library/Caches/company.thebrowser.dia/* "Dia cache"
     if [[ -d ~/Library/Application\ Support/Dia ]]; then
         local _dia_profile
@@ -2637,8 +2637,13 @@ check_large_file_candidates() {
         local path="$1"
         local timeout_seconds="${2:-${MOLE_LARGE_CANDIDATE_SIZE_TIMEOUT:-3}}"
         [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || timeout_seconds=3
-        local du_output=""
-        du_output=$(run_with_timeout "$timeout_seconds" du -skP "$path" 2> /dev/null || true)
+        local du_output="" du_rc=0
+        du_output=$(run_with_timeout "$timeout_seconds" du -skP "$path" 2> /dev/null) || du_rc=$?
+        # Review-only: a timed-out or failed du skips this row. Signals still
+        # cancel the run so Ctrl-C stays sticky.
+        if [[ $du_rc -ge 128 ]]; then
+            return "$du_rc"
+        fi
         local size_kb="${du_output%%[^0-9]*}"
         [[ "$size_kb" =~ ^[0-9]+$ ]] || return 1
         printf '%s\n' "$size_kb"
@@ -2690,8 +2695,12 @@ check_large_file_candidates() {
         local probe_timeout="${3:-}"
         local want_date="${4:-}"
         [[ -d "$path" ]] || return 0
-        local size_kb=""
-        size_kb=$(_large_candidate_size_kb "$path" "$probe_timeout") || return 0
+        local size_kb="" size_rc=0
+        size_kb=$(_large_candidate_size_kb "$path" "$probe_timeout") || size_rc=$?
+        if [[ $size_rc -ge 128 ]]; then
+            return "$size_rc"
+        fi
+        [[ $size_rc -eq 0 ]] || return 0
         [[ "$size_kb" -ge "$threshold_kb" ]] || return 0
         local size_human
         size_human=$(bytes_to_human "$((size_kb * 1024))")
@@ -2702,43 +2711,23 @@ check_large_file_candidates() {
         _report_large_review_row "$label" "$size_human" "$path" "$detail"
     }
 
+    # Review rows never cancel the rest of clean on a size timeout. Signals
+    # still stop the function so Ctrl-C stays sticky.
+    _report_large_or_stop() {
+        _report_large_review_dir "$@" || {
+            local review_rc=$?
+            _mole_record_clean_cancellation "$review_rc"
+            stop_section_spinner
+            return "$review_rc"
+        }
+    }
+
     # The du probes below (Mail, backups, package stores) take seconds in
     # total; keep loading feedback on screen between rows.
     start_section_spinner "Scanning large files..."
 
-    local mail_dir="$HOME/Library/Mail"
-    if [[ -d "$mail_dir" ]]; then
-        local mail_kb
-        size_rc=0
-        mail_kb=$(get_path_size_kb "$mail_dir") || size_rc=$?
-        if [[ $size_rc -ne 0 ]]; then
-            _mole_record_clean_cancellation "$size_rc"
-            stop_section_spinner
-            return "$size_rc"
-        fi
-        if [[ "$mail_kb" -ge "$threshold_kb" ]]; then
-            local mail_human
-            mail_human=$(bytes_to_human "$((mail_kb * 1024))")
-            _report_large_review_row "Mail data" "$mail_human" "$mail_dir"
-        fi
-    fi
-
-    local mail_downloads="$HOME/Library/Mail Downloads"
-    if [[ -d "$mail_downloads" ]]; then
-        local downloads_kb
-        size_rc=0
-        downloads_kb=$(get_path_size_kb "$mail_downloads") || size_rc=$?
-        if [[ $size_rc -ne 0 ]]; then
-            _mole_record_clean_cancellation "$size_rc"
-            stop_section_spinner
-            return "$size_rc"
-        fi
-        if [[ "$downloads_kb" -ge "$threshold_kb" ]]; then
-            local downloads_human
-            downloads_human=$(bytes_to_human "$((downloads_kb * 1024))")
-            _report_large_review_row "Mail downloads" "$downloads_human" "$mail_downloads"
-        fi
-    fi
+    _report_large_or_stop "Mail data" "$HOME/Library/Mail" || return $?
+    _report_large_or_stop "Mail downloads" "$HOME/Library/Mail Downloads" || return $?
 
     local installer_path
     for installer_path in /Applications/Install\ macOS*.app; do
@@ -2746,10 +2735,14 @@ check_large_file_candidates() {
             local installer_kb
             size_rc=0
             installer_kb=$(get_path_size_kb "$installer_path") || size_rc=$?
-            if [[ $size_rc -ne 0 ]]; then
+            if [[ $size_rc -ge 128 ]]; then
                 _mole_record_clean_cancellation "$size_rc"
                 stop_section_spinner
                 return "$size_rc"
+            fi
+            if [[ $size_rc -ne 0 ]]; then
+                debug_log "Large files: skip macOS installer (sizing rc=$size_rc)"
+                continue
             fi
             if [[ "$installer_kb" -gt 0 ]]; then
                 local installer_human
@@ -2759,22 +2752,7 @@ check_large_file_candidates() {
         fi
     done
 
-    local updates_dir="$HOME/Library/Updates"
-    if [[ -d "$updates_dir" ]]; then
-        local updates_kb
-        size_rc=0
-        updates_kb=$(get_path_size_kb "$updates_dir") || size_rc=$?
-        if [[ $size_rc -ne 0 ]]; then
-            _mole_record_clean_cancellation "$size_rc"
-            stop_section_spinner
-            return "$size_rc"
-        fi
-        if [[ "$updates_kb" -ge "$threshold_kb" ]]; then
-            local updates_human
-            updates_human=$(bytes_to_human "$((updates_kb * 1024))")
-            _report_large_review_row "macOS updates cache" "$updates_human" "$updates_dir"
-        fi
-    fi
+    _report_large_or_stop "macOS updates cache" "$HOME/Library/Updates" || return $?
 
     if [[ "${SYSTEM_CLEAN:-false}" != "true" ]] && command -v tmutil > /dev/null 2>&1 &&
         defaults read /Library/Preferences/com.apple.TimeMachine AutoBackup 2> /dev/null | grep -qE '^[01]$'; then
@@ -2820,35 +2798,35 @@ check_large_file_candidates() {
         fi
     fi
 
-    _report_large_review_dir "Xcode DerivedData" "$HOME/Library/Developer/Xcode/DerivedData"
+    _report_large_or_stop "Xcode DerivedData" "$HOME/Library/Developer/Xcode/DerivedData" || return $?
     # Archives hold the dSYMs that symbolicate crashes from shipped builds, so
     # the newest date separates the releases still worth keeping from repeated
     # export attempts left behind on one afternoon.
-    _report_large_review_dir "Xcode archives" "$HOME/Library/Developer/Xcode/Archives" "" "date"
-    _report_large_review_dir "Simulator data" "$HOME/Library/Developer/CoreSimulator/Devices"
+    _report_large_or_stop "Xcode archives" "$HOME/Library/Developer/Xcode/Archives" "" "date" || return $?
+    _report_large_or_stop "Simulator data" "$HOME/Library/Developer/CoreSimulator/Devices" || return $?
     if [[ "$docker_reported" != "true" ]]; then
-        _report_large_review_dir "Docker Desktop data" "$HOME/Library/Containers/com.docker.docker/Data"
+        _report_large_or_stop "Docker Desktop data" "$HOME/Library/Containers/com.docker.docker/Data" || return $?
     fi
     # Device backups reach 100GB+ with millions of small files; the default
     # 3s du budget times out cold and silently drops the most valuable row,
     # so give this probe the hint-scan budget instead.
-    _report_large_review_dir "iOS backups" "$HOME/Library/Application Support/MobileSync/Backup" "$MOLE_TIMEOUT_HINT_SCAN_SEC" "date"
-    _report_large_review_dir "LM Studio models" "$HOME/.lmstudio/models"
+    _report_large_or_stop "iOS backups" "$HOME/Library/Application Support/MobileSync/Backup" "$MOLE_TIMEOUT_HINT_SCAN_SEC" "date" || return $?
+    _report_large_or_stop "LM Studio models" "$HOME/.lmstudio/models" || return $?
     local orbstack_data
     for orbstack_data in "$HOME"/Library/Group\ Containers/*dev.orbstack/data "$HOME/OrbStack"; do
-        _report_large_review_dir "OrbStack data" "$orbstack_data"
+        _report_large_or_stop "OrbStack data" "$orbstack_data" || return $?
     done
-    _report_large_review_dir "Lima data" "$HOME/.lima"
-    _report_large_review_dir "Maven local repository" "$HOME/.m2/repository"
-    _report_large_review_dir "Ivy local repository" "$HOME/.ivy2/cache"
-    _report_large_review_dir "NuGet packages" "$HOME/.nuget/packages"
+    _report_large_or_stop "Lima data" "$HOME/.lima" || return $?
+    _report_large_or_stop "Maven local repository" "$HOME/.m2/repository" || return $?
+    _report_large_or_stop "Ivy local repository" "$HOME/.ivy2/cache" || return $?
+    _report_large_or_stop "NuGet packages" "$HOME/.nuget/packages" || return $?
     local deno_module_cache=""
     if deno_module_cache=$(mole_deno_cache_root 2> /dev/null); then
-        _report_large_review_dir "Deno module cache" "$deno_module_cache"
+        _report_large_or_stop "Deno module cache" "$deno_module_cache" || return $?
     fi
-    _report_large_review_dir "pnpm store" "$HOME/Library/pnpm/store"
-    _report_large_review_dir "Conda packages" "$HOME/.conda/pkgs"
-    _report_large_review_dir "Anaconda packages" "$HOME/anaconda3/pkgs"
+    _report_large_or_stop "pnpm store" "$HOME/Library/pnpm/store" || return $?
+    _report_large_or_stop "Conda packages" "$HOME/.conda/pkgs" || return $?
+    _report_large_or_stop "Anaconda packages" "$HOME/anaconda3/pkgs" || return $?
 
     # JetBrains keeps one data dir per IDE version (GoLand2025.1, ...). After
     # an upgrade the previous version's dir lingers forever with plugins and
@@ -2859,14 +2837,14 @@ check_large_file_candidates() {
     local jb_stale
     while IFS= read -r jb_stale; do
         [[ -n "$jb_stale" ]] || continue
-        _report_large_review_dir "JetBrains old version data" "$jetbrains_support/$jb_stale"
+        _report_large_or_stop "JetBrains old version data" "$jetbrains_support/$jb_stale" || return $?
     done < <(jetbrains_stale_version_dirs "$jetbrains_support")
 
     report_agent_worktree_candidates
 
     stop_section_spinner
 
-    unset -f _large_candidate_size_kb _large_dir_newest_date _report_large_review_dir _report_large_review_row
+    unset -f _large_candidate_size_kb _large_dir_newest_date _report_large_review_dir _report_large_review_row _report_large_or_stop
 
     # Only mark activity when something was reported so an empty section can
     # collapse instead of printing a reassurance row.

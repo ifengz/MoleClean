@@ -2560,6 +2560,10 @@ _simctl_orphan_runtime_rows() {
         }'
 }
 
+# Review-only: prints a hint naming the owner command, never deletes. A
+# simctl timeout here (cold CoreSimulatorService) only costs this run its
+# hint, so it is a debug-logged skip rather than a run-wide cancellation.
+# Signals (>=128) still propagate so Ctrl-C stays sticky.
 check_orphaned_simulator_runtimes() {
     command -v xcrun > /dev/null 2>&1 || return 0
     [[ "${_MOLE_SIMCTL_RESOLUTION_STATUS:-}" == "ready" ]] || return 0
@@ -2567,16 +2571,16 @@ check_orphaned_simulator_runtimes() {
     local runtime_json="" device_json="" probe_status=0
     runtime_json=$(_run_simctl "$MOLE_TIMEOUT_PKG_LIST_SEC" runtime list -j 2> /dev/null) || probe_status=$?
     if [[ $probe_status -ne 0 ]]; then
-        [[ $probe_status -eq 124 || $probe_status -ge 128 ]] && return "$probe_status"
-        debug_log "Orphaned runtime probe failed (exit=$probe_status)"
+        [[ $probe_status -ge 128 ]] && return "$probe_status"
+        debug_log "Orphaned runtime review skipped: runtime probe failed (exit=$probe_status)"
         return 0
     fi
 
     probe_status=0
     device_json=$(_run_simctl "$MOLE_TIMEOUT_PKG_LIST_SEC" list devices -j 2> /dev/null) || probe_status=$?
     if [[ $probe_status -ne 0 ]]; then
-        [[ $probe_status -eq 124 || $probe_status -ge 128 ]] && return "$probe_status"
-        debug_log "Orphaned runtime device probe failed (exit=$probe_status)"
+        [[ $probe_status -ge 128 ]] && return "$probe_status"
+        debug_log "Orphaned runtime review skipped: device probe failed (exit=$probe_status)"
         return 0
     fi
     # Without a recognizable device payload there is no evidence of absence,
@@ -2801,11 +2805,17 @@ clean_dev_mobile() {
                     fi
                 fi # Close if ((unavailable_before == 0))
             fi     # End of simctl_available check
+            # The review reads the same service the listing above just failed
+            # to reach; two more bounded waits would not warm it any faster.
+            if [[ "$simctl_available" == "true" ]]; then
+                check_orphaned_simulator_runtimes || return $?
+            else
+                debug_log "Orphaned runtime review skipped: unavailable-simulator probe failed"
+            fi
         else
             echo -e "  ${GRAY}${ICON_WARNING}${NC} Xcode unavailable simulators · simctl could not be resolved"
             note_activity
         fi
-        check_orphaned_simulator_runtimes || return $?
     fi
     # Old iOS/watchOS/tvOS DeviceSupport versions (debug symbols for connected devices).
     # Each iOS version creates a 1-3 GB folder of debug symbols. Only the versions
@@ -5327,19 +5337,10 @@ clean_developer_tools() {
     # for ~94s before its first output on the next run.
     _run_developer_cleanup_step \
         safe_clean ~/Library/Caches/Homebrew/downloads/* "Homebrew cache" || return $?
-    local brew_lock_dirs=(
-        "/opt/homebrew/var/homebrew/locks"
-        "/usr/local/var/homebrew/locks"
-    )
-    for lock_dir in "${brew_lock_dirs[@]}"; do
-        if [[ -d "$lock_dir" && -w "$lock_dir" ]]; then
-            _run_developer_cleanup_step \
-                safe_clean "$lock_dir"/* "Homebrew lock files" || return $?
-        elif [[ -d "$lock_dir" ]]; then
-            if find "$lock_dir" -mindepth 1 -maxdepth 1 -print -quit 2> /dev/null | grep -q .; then
-                debug_log "Skipping read-only Homebrew locks in $lock_dir"
-            fi
-        fi
-    done
+    # Homebrew's lock directory is deliberately not swept. Every file in it is
+    # zero bytes, so the whole directory reclaims nothing measurable, while
+    # deleting a lock a running `brew fetch` still holds makes that fetch fail
+    # with `No such file or directory @ dir_s_rmdir` (#1594). `brew cleanup`
+    # below already prunes what is genuinely stale, under Homebrew's own locking.
     _run_developer_cleanup_step clean_homebrew || return $?
 }

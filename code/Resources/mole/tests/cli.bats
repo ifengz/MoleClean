@@ -139,6 +139,29 @@ SCRIPT
 	[[ "$output" == *"Install: Manual"* ]]
 }
 
+@test "mole invoked through a cross-directory symlink still sources lib" {
+	local link_dir
+	link_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/mole-abs-link.XXXXXX")"
+	ln -s "$PROJECT_ROOT/mole" "$link_dir/mole"
+	run env HOME="$HOME" "$link_dir/mole" --help
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"mo clean"* ]] || return 1
+}
+
+@test "mole invoked through a Homebrew-style prefix symlink still sources lib" {
+	local prefix cellar
+	prefix="$(mktemp -d "${BATS_TEST_TMPDIR}/mole-brew-prefix.XXXXXX")"
+	cellar="$prefix/Cellar/mole/9.9.9/bin"
+	mkdir -p "$prefix/bin" "$cellar"
+	cp "$PROJECT_ROOT/mole" "$cellar/mole"
+	chmod +x "$cellar/mole"
+	cp -R "$PROJECT_ROOT/lib" "$prefix/bin/lib"
+	ln -s "$cellar/mole" "$prefix/bin/mole"
+	run env HOME="$HOME" "$prefix/bin/mole" --help
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"mo clean"* ]] || return 1
+}
+
 @test "mole --version shows nightly channel metadata" {
 	expected_version="$(grep '^VERSION=' "$PROJECT_ROOT/mole" | head -1 | sed 's/VERSION=\"\(.*\)\"/\1/')"
 	mkdir -p "$HOME/.config/mole"
@@ -758,7 +781,14 @@ PY
 
 @test "user CLI entrypoints refuse root before loading shared user state" {
     for entry in mole bin/clean.sh bin/optimize.sh bin/purge.sh bin/uninstall.sh bin/installer.sh bin/touchid.sh bin/completion.sh; do
-        prefix=$(awk '/^(SCRIPT_DIR|ROOT_DIR|LIB_DIR)=/ { exit } { print }' "$PROJECT_ROOT/$entry")
+        # Only the EUID guard. Stopping at the first SCRIPT_DIR= assignment
+        # would pull the mole symlink walker into a bash -c prefix, where
+        # BASH_SOURCE is not a real file.
+        prefix=$(awk '
+            /^if \[\[ "\$EUID"/ { keep=1 }
+            keep { print }
+            /^fi$/ && keep { exit }
+        ' "$PROJECT_ROOT/$entry")
         # Execute the actual source prefix, substituting only the read-only UID
         # so the test never requests root or runs a maintenance command.
         run /bin/bash -c "${prefix//\$EUID/0}"

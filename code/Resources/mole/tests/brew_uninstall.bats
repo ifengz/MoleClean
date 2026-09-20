@@ -722,3 +722,82 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == "test-cask-app" ]]
 }
+
+# Only discovery and Homebrew are mocked; app identity uses real fixture
+# directories and symlinks so a same-name copy cannot satisfy the fallback.
+run_caskroom_info_failure_case() {
+    local scenario="$1"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" SCENARIO="$scenario" \
+        FIXTURE="$BATS_TEST_TMPDIR" /bin/bash --noprofile --norc <<'SCRIPT'
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/brew.sh"
+mkdir -p "$FIXTURE/selected/Rebased.app" "$FIXTURE/other/Rebased.app" "$FIXTURE/cask"
+app_path="$FIXTURE/selected/Rebased.app"
+match="$FIXTURE/cask/Rebased.app"
+ln -s "$app_path" "$match"
+case "$SCENARIO" in
+    unrelated) rm "$match"; ln -s "$FIXTURE/other/Rebased.app" "$match" ;;
+    copied) rm "$match"; mkdir "$match" ;;
+esac
+find() { printf '%s\n' "$FIXTURE/cask/Rebased.app"; }
+# Production token parsing has independent coverage; fixture paths must not
+# create or change the machine's actual Caskroom.
+_extract_cask_token_from_path() { printf '%s\n' rebased; }
+run_with_timeout() { shift; "$@"; }
+_mole_brew_probe() {
+    shift
+    case "$*" in
+        'list --cask') printf '%s\n' rebased ;;
+        'info --cask rebased')
+            case "$SCENARIO" in
+                timeout) return 124 ;;
+                cancelled) return 143 ;;
+                retargeted) rm "$FIXTURE/cask/Rebased.app"; ln -s "$FIXTURE/other/Rebased.app" "$FIXTURE/cask/Rebased.app" ;;
+            esac
+            return 1
+            ;;
+        *) return 99 ;;
+    esac
+}
+result=""
+rc=0
+result=$(_detect_cask_via_caskroom_search Rebased.app "$app_path") || rc=$?
+printf 'rc=%s token=%s\n' "$rc" "$result"
+SCRIPT
+}
+
+@test "third-party cask info failure accepts the exact installed app (#1558)" {
+    run_caskroom_info_failure_case exact
+    [ "$status" -eq 0 ]
+    [ "$output" = 'rc=0 token=rebased' ]
+}
+
+@test "third-party cask info failure refuses a same-name app at another path (#1558)" {
+    run_caskroom_info_failure_case unrelated
+    [ "$status" -eq 0 ]
+    [ "$output" = 'rc=2 token=' ]
+}
+
+@test "third-party cask info failure refuses a same-name copied bundle (#1558)" {
+    run_caskroom_info_failure_case copied
+    [ "$status" -eq 0 ]
+    [ "$output" = 'rc=2 token=' ]
+}
+
+@test "third-party cask info failure rechecks a retargeted symlink (#1558)" {
+    run_caskroom_info_failure_case retargeted
+    [ "$status" -eq 0 ]
+    [ "$output" = 'rc=2 token=' ]
+}
+
+@test "third-party cask info timeout is not bypassed by exact ownership (#1558)" {
+    run_caskroom_info_failure_case timeout
+    [ "$status" -eq 0 ]
+    [ "$output" = 'rc=124 token=' ]
+}
+
+@test "third-party cask info cancellation is not bypassed by exact ownership (#1558)" {
+    run_caskroom_info_failure_case cancelled
+    [ "$status" -eq 0 ]
+    [ "$output" = 'rc=143 token=' ]
+}

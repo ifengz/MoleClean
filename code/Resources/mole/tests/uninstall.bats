@@ -3171,6 +3171,117 @@ INNER
     [ "$status" -eq 0 ]
 }
 
+@test "select_apps_for_uninstall keeps menu line width within 80 columns for Yesterday items (#1573)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="xterm-256color" /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/ui/app_selector.sh"
+
+long_app_name="Visual Studio Code - Insiders Edition Long Title For App"
+apps_data=("1700000000|/Applications/Test.app|$long_app_name|com.example.test|100MB|Yesterday|102400")
+selected_apps=()
+drain_pending_input() { :; }
+
+captured_option=""
+paginated_multi_select() {
+    captured_option="$2"
+    MOLE_SELECTION_RESULT=""
+    return 1
+}
+
+tput() { echo 80; }
+select_apps_for_uninstall || true
+
+normal_line="  ○ $captured_option"
+active_line="${ICON_ARROW} ○ $captured_option"
+
+# Standard 80-column terminal must not wrap or leave orphan 'ay' characters
+[[ ${#normal_line} -le 80 ]] || {
+    printf 'normal line length %d exceeds 80: %s\n' "${#normal_line}" "$normal_line" >&2
+    exit 1
+}
+[[ $(get_display_width "$normal_line") -le 80 ]] || {
+    printf 'normal line display width %d exceeds 80\n' "$(get_display_width "$normal_line")" >&2
+    exit 1
+}
+[[ $(get_display_width "$active_line") -le 80 ]] || {
+    printf 'active line display width %d exceeds 80\n' "$(get_display_width "$active_line")" >&2
+    exit 1
+}
+INNER
+
+    [ "$status" -eq 0 ]
+}
+
+@test "select_apps_for_uninstall keeps Steam and Yesterday rows within 80 columns (#1573)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="xterm-256color" /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/ui/app_selector.sh"
+
+long_app_name="Visual Studio Code - Insiders Edition Long Title For App"
+apps_data=("1700000000|/Applications/SteamGame.app|$long_app_name|com.example.steam|N/A (Steam-managed)|Yesterday|95")
+selected_apps=()
+drain_pending_input() { :; }
+
+captured_option=""
+paginated_multi_select() {
+    captured_option="$2"
+    MOLE_SELECTION_RESULT=""
+    return 1
+}
+
+tput() { echo 80; }
+select_apps_for_uninstall || true
+
+normal_line="  ○ $captured_option"
+active_line="${ICON_ARROW} ○ $captured_option"
+
+[[ "$captured_option" == *"    Steam |"* ]] || {
+    printf 'selector missing compact Steam label: %s\n' "$captured_option" >&2
+    exit 1
+}
+[[ "$captured_option" != *"N/A (Steam-managed)"* ]] || {
+    printf 'selector still used the 19-column Steam label: %s\n' "$captured_option" >&2
+    exit 1
+}
+[[ $(get_display_width "$normal_line") -le 80 ]] || {
+    printf 'normal line display width %d exceeds 80: %s\n' "$(get_display_width "$normal_line")" "$normal_line" >&2
+    exit 1
+}
+[[ $(get_display_width "$active_line") -le 80 ]] || {
+    printf 'active line display width %d exceeds 80: %s\n' "$(get_display_width "$active_line")" "$active_line" >&2
+    exit 1
+}
+INNER
+
+    [ "$status" -eq 0 ]
+}
+
+@test "format_app_display keeps Yesterday rows inside a 40-column terminal (#1573)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="xterm-256color" /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/ui/app_selector.sh"
+
+name=$(printf 'A%.0s' {1..70})
+row=$(format_app_display "$name" "1023.5MB" "Yesterday" 40)
+normal_line="  ○ $row"
+[[ "$row" == *Yesterday* ]] || {
+    printf 'missing Yesterday: %s\n' "$row" >&2
+    exit 1
+}
+[[ $(get_display_width "$normal_line") -le 40 ]] || {
+    printf '40-col overflow width=%d: %s\n' "$(get_display_width "$normal_line")" "$normal_line" >&2
+    exit 1
+}
+INNER
+
+    [ "$status" -eq 0 ]
+}
+
 @test "paginated menu can ignore one initial Enter for uninstall launch guard" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="xterm-256color" /bin/bash --noprofile --norc << 'INNER'
 set -euo pipefail
@@ -4180,4 +4291,59 @@ EOF
     [[ "$output" == *"|Foo|"* ]] || return 1
     [[ "$output" == *"|Bar|"* ]] || return 1
     [[ "$output" != *"Foo Bar"* ]] || return 1
+}
+
+@test "batch uninstall reports an inconclusive Homebrew scan before any removal (#1579, #1580)" {
+    run env HOME="$HOME/batch-brew-failure" PROJECT_ROOT="$PROJECT_ROOT" \
+        /bin/bash --noprofile --norc <<'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+
+app_path="$HOME/Applications/TimedOut.app"
+mkdir -p "$app_path"
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+_batch_refresh_selected_app_bundle_id() { printf 'com.example.TimedOut\n'; }
+official_uninstaller_vendor() { return 1; }
+uninstall_bundle_id_has_surviving_sibling() { return 1; }
+uninstall_live_bundle_has_other_install() {
+    _MOLE_UNINSTALL_LIVE_SIBLING_FINGERPRINT=""
+    _MOLE_UNINSTALL_LIVE_SIBLING_PATHS=()
+    return 1
+}
+pgrep() { return 1; }
+get_brew_cask_name() { return 2; }
+get_file_owner() { whoami; }
+get_path_size_kb() { echo "UNEXPECTED_SIZE"; }
+find_app_files() { echo "UNEXPECTED_DISCOVERY"; return 99; }
+stop_launch_services() { echo "UNEXPECTED_TEARDOWN"; }
+unregister_app_bundle() { echo "UNEXPECTED_TEARDOWN"; }
+remove_login_item() { echo "UNEXPECTED_TEARDOWN"; }
+force_kill_app() { echo "UNEXPECTED_TEARDOWN"; }
+mole_delete() { echo "UNEXPECTED_DELETE"; }
+
+selected_apps=("0|$app_path|TimedOut|com.example.TimedOut|0|Never")
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+rc=0
+batch_uninstall_applications || rc=$?
+printf 'RC=%s\n' "$rc"
+[[ $rc -eq 1 ]]
+INNER
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"RC=1"* ]] || return 1
+    [[ "$output" == *"Homebrew ownership check"* ]] || return 1
+    [[ "$output" == *"nothing was removed"* ]] || return 1
+    [[ "$output" == *"'TimedOut' matches a Homebrew cask brew cannot read"* ]] || return 1
+    [[ "$output" == *"brew info --cask"* ]] || return 1
+    # A cask brew cannot parse still lists cleanly, so pointing the user at
+    # `brew list --cask` diagnoses nothing.
+    [[ "$output" != *"brew list --cask"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_SIZE"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DISCOVERY"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_TEARDOWN"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DELETE"* ]]
 }

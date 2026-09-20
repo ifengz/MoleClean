@@ -252,12 +252,22 @@ _mole_is_user_cache_sqlite_family_path() {
 # Exact browser partial-download files directly under Downloads. These may be
 # actively written even when their browser process name is unavailable, so the
 # final deletion gate must recheck the file handle itself.
+# A partial download is a mutable file some process may still be writing, not a
+# rebuildable cache, so callers gate it on an open-handle probe instead of size
+# or age. Homebrew's cache belongs here for the same reason the browser roots
+# do: `brew fetch` writes `<sha>--<name>.incomplete` and holds it open for the
+# length of the transfer, and a blanket sweep of that directory deleted six
+# in-flight cask downloads out from under a running fetch (#1594).
 _mole_is_incomplete_download_path() {
     local downloads_root="${HOME%/}/Downloads"
+    local brew_downloads="${HOME%/}/Library/Caches/Homebrew/downloads"
     local path="$1"
     case "$path" in
         "$downloads_root"/*.download | "$downloads_root"/*.crdownload | "$downloads_root"/*.part)
             [[ "${path#"$downloads_root"/}" != */* ]]
+            ;;
+        "$brew_downloads"/*.incomplete)
+            [[ "${path#"$brew_downloads"/}" != */* ]]
             ;;
         *) return 1 ;;
     esac

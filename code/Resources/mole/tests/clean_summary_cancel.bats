@@ -60,6 +60,43 @@ perform_cleanup
 EOF
 }
 
+@test "orphaned leftover mdfind timeout does not cancel later sections (#1584)" {
+    mkdir -p "$HOME/Library/Caches/com.example.stale"
+    touch -t 200001010000 "$HOME/Library/Caches/com.example.stale"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=1 \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+for fn in clean_user_essentials clean_finder_metadata clean_app_caches \
+    clean_browsers run_cloud_and_office_cleanup clean_developer_tools \
+    clean_user_gui_applications clean_virtualization_tools \
+    clean_application_support_logs \
+    clean_orphaned_system_services clean_orphaned_container_stubs \
+    show_user_launch_agent_hint_notice \
+    clean_apple_silicon_caches clean_cached_device_firmware \
+    clean_time_machine_failed_backups check_large_file_candidates \
+    show_project_artifact_hint_notice; do
+    eval "$fn() { return 0; }"
+done
+scan_installed_apps() { : > "$1"; }
+run_with_timeout() {
+    local _timeout="$1"
+    shift
+    if [[ "$1" == mdfind ]]; then
+        return 124
+    fi
+    "$@"
+}
+check_large_file_candidates() { echo LATER_SECTION; return 0; }
+perform_cleanup
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"LATER_SECTION"* ]] || return 1
+    [[ "$output" == *"Dry run complete"* ]] || return 1
+    [[ "$output" != *"Dry run cancelled"* ]] || return 1
+}
+
 @test "sizing timeout (124) still prints the summary (#1342)" {
     run_perform_cleanup_with 124
 
@@ -253,8 +290,8 @@ EOF
     [[ "$output" != *"Cleanup cancelled"* ]]
 }
 
-@test "run with removal timeouts completes and reports them (#1384)" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
+@test "partial cleanup keeps routine timeouts out of the default summary" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MO_DEBUG=0 \
         /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/bin/clean.sh"
@@ -270,18 +307,32 @@ for fn in clean_user_essentials clean_finder_metadata clean_app_caches \
     show_project_artifact_hint_notice; do
     eval "$fn() { return 0; }"
 done
-clean_user_essentials() { MOLE_CLEAN_REMOVAL_TIMEOUTS=3; return 0; }
+clean_user_essentials() {
+    MOLE_CLEAN_REMOVAL_TIMEOUTS=2
+    MOLE_CLEAN_SIZING_TIMEOUTS=1
+    total_size_cleaned=10485760
+    files_cleaned=42
+    total_items=9
+}
 perform_cleanup
+printf 'RECORDED=%s/%s\n' "$MOLE_CLEAN_SIZING_TIMEOUTS" "$MOLE_CLEAN_REMOVAL_TIMEOUTS"
 EOF
 
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Cleanup complete"* ]]
-    [[ "$output" != *"Cleanup cancelled"* ]]
-    [[ "$output" == *"3 item(s) exceeded the 30s removal budget"* ]]
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # The full runner enables ANSI colors; assert the rendered text in either mode.
+    local plain_output
+    plain_output=$(printf '%s' "$output" | sed -E $'s/\033\\[[0-9;]*m//g')
+    [[ "$output" == *"Cleanup complete"* ]] || return 1
+    [[ "$plain_output" == *"Tracked cleanup: At least 10.74GB | Items cleaned: 42"* ]] || return 1
+    [[ "$output" == *"RECORDED=1/2"* ]] || return 1
+    [[ "$output" == *"Free space:"* ]] || return 1
+    [[ "$output" != *"size-check budget"* && "$output" != *"removal budget"* ]] || return 1
+    [[ "$output" != *"MOLE_TIMEOUT_DISK_VERIFY_SEC"* && "$output" != *"Run clean again"* ]] || return 1
+    [[ "$output" != *"Categories:"* && "$output" != *"4K movie"* ]] || return 1
 }
 
-@test "run with removal timeouts names the timed-out paths (#1384)" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" \
+@test "debug output retains routine timeout details and paths (#1384)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MO_DEBUG=1 \
         /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/bin/clean.sh"
@@ -298,6 +349,7 @@ for fn in clean_user_essentials clean_finder_metadata clean_app_caches \
 done
 clean_user_essentials() {
     MOLE_CLEAN_REMOVAL_TIMEOUTS=2
+    MOLE_CLEAN_SIZING_TIMEOUTS=1
     _mole_record_removal_timeout_path "$HOME/Library/Developer/XCTestDevices/clone-one"
     _mole_record_removal_timeout_path "$HOME/Library/Developer/XCTestDevices/clone-two"
     return 0
@@ -310,12 +362,14 @@ EOF
         return 1
     }
     [[ "$output" == *"2 item(s) exceeded the 30s removal budget"* ]] || return 1
+    [[ "$output" == *"size-check budget"* ]] || return 1
     [[ "$output" == *"XCTestDevices/clone-one"* ]] || return 1
     [[ "$output" == *"XCTestDevices/clone-two"* ]] || return 1
     # Abbreviated to ~: three absolute paths under the home directory run past
     # the one line this note is capped to.
     [[ "$output" == *"~/Library/Developer/XCTestDevices/clone-one"* ]] || { echo "$output"; return 1; }
     [[ "$output" != *"$HOME/Library/Developer/XCTestDevices/clone-one"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"System was already clean"* ]] || return 1
 }
 
 @test "sizing timeouts still clean and the summary reports the under-count (#1374)" {
@@ -352,7 +406,10 @@ EOF
     }
     [[ "$output" == *"Cleanup complete"* ]] || return 1
     [[ "$output" != *"Cleanup cancelled"* ]] || return 1
-    [[ "$output" == *"size-check budget"* ]] || return 1
-    [[ "$output" == *"under-reported"* ]] || return 1
+    local plain_output
+    plain_output=$(printf '%s' "$output" | sed -E $'s/\033\\[[0-9;]*m//g')
+    [[ "$plain_output" == *"Tracked cleanup: Partially measured"* ]] || return 1
+    [[ "$output" != *"size-check budget"* ]] || return 1
+    [[ "$output" != *"System was already clean"* ]] || return 1
     [[ ! -e "$HOME/Library/Caches/cache1374" ]]
 }

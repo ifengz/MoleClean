@@ -949,6 +949,114 @@ EOF
     [[ "$output" != *"users/global/"* ]] || return 1
 }
 
+@test "clean_notion_service_worker_caches targets CacheStorage in every Electron partition" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+partitions="$HOME/Library/Application Support/Notion/Partitions"
+mkdir -p "$partitions/notion/Service Worker/CacheStorage"
+mkdir -p "$partitions/notion-second/Service Worker/CacheStorage"
+# A partition with no Service Worker cache, and the siblings that must survive.
+mkdir -p "$partitions/empty-partition"
+mkdir -p "$partitions/notion/Service Worker/ScriptCache"
+mkdir -p "$partitions/notion/Service Worker/Database"
+mkdir -p "$partitions/notion/Local Storage"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+notion_running() { return 1; }
+clean_service_worker_cache() { echo "SW|$1|$2|$3"; }
+clean_notion_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    local base="$HOME/Library/Application Support/Notion/Partitions"
+    [[ "$output" == *"SW|Notion|$base/notion/Service Worker/CacheStorage|_notion_service_worker_delete_guard_allows"* ]] || return 1
+    [[ "$output" == *"SW|Notion|$base/notion-second/Service Worker/CacheStorage|_notion_service_worker_delete_guard_allows"* ]] || return 1
+    [[ "$output" != *"empty-partition"* ]] || return 1
+    [[ "$output" != *"ScriptCache"* ]] || return 1
+    [[ "$output" != *"Database"* ]] || return 1
+    [[ "$output" != *"Local Storage"* ]]
+}
+
+@test "clean_notion_service_worker_caches defers every partition while Notion is running" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/Library/Application Support/Notion/Partitions/notion/Service Worker/CacheStorage/origin/cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+notion_running() { return 0; }
+mole_defer_cleanup_family() { echo "DEFER:$1"; }
+safe_remove() { echo "UNEXPECTED_REMOVE:$1"; return 0; }
+clean_notion_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"DEFER:Notion"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_REMOVE"* ]]
+}
+
+@test "clean_notion_service_worker_caches fails closed on unknown owner state" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/Library/Application Support/Notion/Partitions/notion/Service Worker/CacheStorage/origin/cache"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+notion_running() { return 2; }
+mole_defer_cleanup_family() { echo "UNEXPECTED_DEFER:$1"; }
+safe_remove() { echo "UNEXPECTED_REMOVE:$1"; return 0; }
+note_activity() { :; }
+clean_notion_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"Notion Service Worker · stopped (process state unknown)"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_REMOVE"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DEFER"* ]]
+}
+
+@test "clean_notion_service_worker_caches refuses a symlinked partitions root" {
+    local iso="$HOME/iso-notion-root-symlink"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/Library/Application Support/Notion" "$HOME/outside/notion/Service Worker/CacheStorage"
+touch "$HOME/outside/notion/Service Worker/CacheStorage/private"
+ln -s "$HOME/outside" "$HOME/Library/Application Support/Notion/Partitions"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+notion_running() { return 1; }
+clean_service_worker_cache() { echo "SW|$2"; }
+clean_notion_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"outside"* ]] || return 1
+    [[ "$output" != *"SW|"* ]]
+}
+
+@test "clean_notion_service_worker_caches refuses a symlinked cache child" {
+    local iso="$HOME/iso-notion-child-symlink"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+sw="$HOME/Library/Application Support/Notion/Partitions/notion/Service Worker"
+mkdir -p "$sw" "$HOME/outside"
+touch "$HOME/outside/private"
+ln -s "$HOME/outside" "$sw/CacheStorage"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+notion_running() { return 1; }
+clean_service_worker_cache() { echo "SW|$2"; }
+clean_notion_service_worker_caches
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"outside"* ]] || return 1
+    [[ "$output" != *"SW|"* ]]
+}
+
 @test "clean_feishu_service_worker_caches preserves pipe characters in profile paths" {
     local pipe_home="$HOME/home|pipe"
     run env HOME="$pipe_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'

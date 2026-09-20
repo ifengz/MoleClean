@@ -1315,6 +1315,7 @@ _batch_scan_app_details() {
         [[ -z "$selected_app" ]] && continue
         IFS='|' read -r _ app_path app_name bundle_id _ _ <<< "$selected_app"
 
+        _batch_scan_stage="application identity check"
         local current_bundle_id=""
         local refresh_rc=0
         current_bundle_id=$(_batch_refresh_selected_app_bundle_id \
@@ -1369,6 +1370,7 @@ _batch_scan_app_details() {
         # Narrow the plan to the selected app bundle only: no bundle-id/name
         # leftovers, login item, process, helper, or Homebrew zap teardown.
         # Execution compares the exact snapshot before its first side effect.
+        _batch_scan_stage="other installation check"
         local live_sibling_rc=0
         local live_sibling_present=false
         uninstall_live_bundle_has_other_install \
@@ -1469,6 +1471,7 @@ _batch_scan_app_details() {
             running_apps+=("$app_name")
         fi
 
+        _batch_scan_stage="Homebrew ownership check"
         local cask_name="" is_brew_cask="false"
         if command -v get_brew_cask_name > /dev/null 2>&1; then
             local detected_cask=""
@@ -1477,6 +1480,10 @@ _batch_scan_app_details() {
             if [[ $cask_detect_rc -eq 124 || $cask_detect_rc -ge 128 ]]; then
                 return "$cask_detect_rc"
             elif [[ $cask_detect_rc -ne 0 && $cask_detect_rc -ne 1 ]]; then
+                # A cask brew cannot parse still lists cleanly under
+                # `brew list --cask`, so the app name is the only handle the
+                # abort message can give the user on which selection failed.
+                _batch_scan_app_name="$app_name"
                 return "$cask_detect_rc"
             fi
             if [[ -n "$detected_cask" ]]; then
@@ -1515,6 +1522,7 @@ _batch_scan_app_details() {
             continue
         fi
 
+        _batch_scan_stage="application size check"
         local app_size_kb="0"
         local app_size_rc=0
         app_size_kb=$(get_path_size_kb "$app_path") || app_size_rc=$?
@@ -1536,6 +1544,7 @@ _batch_scan_app_details() {
             # caches the surviving install uses.
             local sibling_survives=0
             [[ "$sibling_guard" != "none" ]] && sibling_survives=1
+            _batch_scan_stage="leftover scan"
             local discovery_rc=0
             related_files=$(MOLE_UNINSTALL_SIBLING_SURVIVES="$sibling_survives" \
                 find_app_files "$bundle_id" "$discovery_app_name" \
@@ -1557,6 +1566,7 @@ _batch_scan_app_details() {
             # fail-safe direction. Skip follow-on probes when leftover
             # discovery already timed out so we do not burn the floor budget.
             if [[ "$sibling_guard" == "none" && $discovery_rc -ne 124 ]]; then
+                _batch_scan_stage="diagnostic report scan"
                 local diag_rc=0
                 diag_user=$(get_diagnostic_report_paths_for_app "$app_path" \
                     "$discovery_app_name" \
@@ -1582,6 +1592,7 @@ _batch_scan_app_details() {
                 fi
             fi
             if [[ $discovery_rc -ne 124 ]]; then
+                _batch_scan_stage="system leftover scan"
                 local system_rc=0
                 system_files=$(find_app_system_files \
                     "$bundle_id" "$discovery_app_name") || system_rc=$?
@@ -2577,6 +2588,8 @@ batch_uninstall_applications() {
     local total_estimated_size=0
     local -a app_details=()
 
+    local _batch_scan_stage="application inspection"
+    local _batch_scan_app_name=""
     local _scan_rc=0
     _batch_scan_app_details || _scan_rc=$?
     if [[ $_batch_interrupted -eq 1 ]]; then
@@ -2593,6 +2606,12 @@ batch_uninstall_applications() {
         return "$_scan_rc"
     elif [[ $_scan_rc -ne 0 ]]; then
         _abort_uninstall_batch
+        log_error "Could not finish the uninstall scan ($_batch_scan_stage, exit $_scan_rc); nothing was removed"
+        if [[ "$_batch_scan_stage" == "Homebrew ownership check" ]]; then
+            log_info "'$_batch_scan_app_name' matches a Homebrew cask brew cannot read; run brew info --cask <cask>, fix or untap it, then retry mo uninstall --debug"
+        else
+            log_info "Run mo uninstall --debug to see which scan failed"
+        fi
         return 1
     fi
 
