@@ -14,6 +14,15 @@ setup_file() {
     MOLE_TEST_MODE=1
     export MOLE_TEST_MODE
 
+    # clean_browsers reaches the Chrome, Edge, and Brave old-version cleaners,
+    # which default to the real /Applications bundles. Cases that stub pgrep as
+    # "not running" would otherwise delete a staged browser version on the Mac
+    # running the suite, including the one a live browser is still using.
+    MOLE_CHROME_APP_PATHS="$HOME/Applications/Google Chrome.app"
+    MOLE_EDGE_APP_PATHS="$HOME/Applications/Microsoft Edge.app"
+    MOLE_BRAVE_APP_PATHS="$HOME/Applications/Brave Browser.app"
+    export MOLE_CHROME_APP_PATHS MOLE_EDGE_APP_PATHS MOLE_BRAVE_APP_PATHS
+
     mkdir -p "$HOME"
 }
 
@@ -24,6 +33,27 @@ teardown_file() {
     if [[ -n "${ORIGINAL_HOME:-}" ]]; then
         export HOME="$ORIGINAL_HOME"
     fi
+}
+
+@test "browser old-version cleaners stay inside the fixture HOME" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+_clean_chromium_old_versions() {
+    shift 3
+    printf 'APP:%s\n' "$@"
+}
+clean_chrome_old_versions
+clean_edge_old_versions
+clean_brave_old_versions
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"APP:$HOME/Applications/Google Chrome.app"* ]] || return 1
+    [[ "$output" == *"APP:$HOME/Applications/Microsoft Edge.app"* ]] || return 1
+    [[ "$output" == *"APP:$HOME/Applications/Brave Browser.app"* ]] || return 1
+    [[ "$output" != *"APP:/Applications/"* ]]
 }
 
 @test "clean_user_essentials respects Trash whitelist" {
@@ -2331,8 +2361,9 @@ EOF
 }
 
 # Regression for discussion #583: the only Dia row used to be
-# ~/Library/Caches/company.thebrowser.dia, which on a real install holds nothing
-# but Sentry crash state. The actual Chromium caches live under
+# ~/Library/Caches/company.thebrowser.dia, where that measurement found Sentry
+# state, not Chromium caches; the directory can also contain Sparkle updates.
+# The actual Chromium caches live under
 # ~/Library/Caches/Dia/User Data and ~/Library/Application Support/Dia/User Data,
 # so `mo clean` reclaimed 0 bytes from Dia. Paths below were measured on Dia
 # 1.41.1 (bundle company.thebrowser.dia), not inferred from Chromium convention.
@@ -2523,6 +2554,100 @@ EOF
     }
     [[ "$derived_row" != *[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]* ]] || {
         echo "$derived_row"
+        return 1
+    }
+}
+
+@test "large files skip a timed-out Mail size check and keep later rows (#1576)" {
+    local review_home="$HOME/large-review-mail-timeout"
+    mkdir -p \
+        "$review_home/Library/Mail" \
+        "$review_home/Library/Developer/Xcode/DerivedData"
+
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+du() { printf '2097152 %s\n' "${2:-/tmp}"; }
+# Cover both the current get_path_size_kb Mail rows and the review-dir
+# helper that sizes through run_with_timeout + du.
+get_path_size_kb() {
+    [[ "$1" == "$HOME/Library/Mail" ]] && return 124
+    printf '2097152\n'
+}
+run_with_timeout() {
+    shift
+    [[ "${!#}" == "$HOME/Library/Mail" ]] && return 124
+    "$@"
+}
+check_large_file_candidates
+echo AFTER_LARGE_FILES
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"AFTER_LARGE_FILES"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"Mail data"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"Xcode DerivedData"* ]] || {
+        echo "$output"
+        return 1
+    }
+}
+
+@test "large files still cancel when Mail sizing is interrupted (#1576)" {
+    local review_home="$HOME/large-review-mail-signal"
+    mkdir -p \
+        "$review_home/Library/Mail" \
+        "$review_home/Library/Developer/Xcode/DerivedData"
+
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -uo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+du() { printf '2097152 %s\n' "${2:-/tmp}"; }
+get_path_size_kb() {
+    [[ "$1" == "$HOME/Library/Mail" ]] && return 130
+    printf '2097152\n'
+}
+run_with_timeout() {
+    shift
+    [[ "${!#}" == "$HOME/Library/Mail" ]] && return 130
+    "$@"
+}
+MOLE_CURRENT_COMMAND=clean
+MOLE_CLEAN_CANCEL_STATUS=0
+check_large_file_candidates
+echo AFTER_LARGE_FILES
+EOF
+
+    [ "$status" -eq 130 ] || {
+        echo "status=$status $output"
+        return 1
+    }
+    [[ "$output" != *"AFTER_LARGE_FILES"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" != *"Xcode DerivedData"* ]] || {
+        echo "$output"
         return 1
     }
 }

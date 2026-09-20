@@ -1677,7 +1677,25 @@ EOF
 	[[ "$output" == *"Legacy Overrides|legacy_overrides_audit|optimize_task"* ]] || return 1
 }
 
+# Login-item matching fixtures must not scan apps installed on the test host.
+setup_login_item_fixture() {
+	HOME="$HOME/login-item-$BATS_TEST_NUMBER"
+	export HOME
+	mkdir -p "$HOME/bin"
+	printf '#!/bin/bash\nexit 1\n' > "$HOME/bin/mdfind"
+	cat > "$HOME/bin/find" <<'EOF'
+#!/bin/bash
+case "$1" in
+    "$HOME"/*) exec /usr/bin/find "$@" ;;
+    *) exit 0 ;;
+esac
+EOF
+	chmod +x "$HOME/bin/mdfind" "$HOME/bin/find"
+	export PATH="$HOME/bin:$PATH"
+}
+
 @test "_login_item_app_exists finds nested helper app bundles" {
+	setup_login_item_fixture
 	local helper="$HOME/Applications/Roon.app/Contents/RoonServer.app"
 	mkdir -p "$helper"
 
@@ -1685,11 +1703,6 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-mkdir -p "$HOME/bin"
-printf '#!/bin/bash\nexit 1\n' > "$HOME/bin/mdfind"
-chmod +x "$HOME/bin/mdfind"
-PATH="$HOME/bin:$PATH"
-sfltool() { return 1; }
 if _login_item_app_exists "RoonServer"; then
     echo "found"
 fi
@@ -1700,6 +1713,7 @@ EOF
 }
 
 @test "_login_item_app_exists finds nested mixed-case app bundles" {
+	setup_login_item_fixture
 	local helper="$HOME/Applications/Roon.APP/Contents/RoonServer.APP"
 	mkdir -p "$helper"
 
@@ -1707,11 +1721,6 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-mkdir -p "$HOME/bin"
-printf '#!/bin/bash\nexit 1\n' > "$HOME/bin/mdfind"
-chmod +x "$HOME/bin/mdfind"
-PATH="$HOME/bin:$PATH"
-sfltool() { return 1; }
 if _login_item_app_exists "RoonServer"; then
     echo "found"
 fi
@@ -1722,6 +1731,7 @@ EOF
 }
 
 @test "_login_item_app_exists finds nested helper apps by bundle display name" {
+	setup_login_item_fixture
 	local helper="$HOME/Applications/Adobe Acrobat DC.app/Contents/Helpers/AdobeResourceSynchronizer.app"
 	mkdir -p "$helper/Contents"
 	cat > "$helper/Contents/Info.plist" <<'PLIST'
@@ -1741,11 +1751,6 @@ PLIST
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-mkdir -p "$HOME/bin"
-printf '#!/bin/bash\nexit 1\n' > "$HOME/bin/mdfind"
-chmod +x "$HOME/bin/mdfind"
-PATH="$HOME/bin:$PATH"
-sfltool() { return 1; }
 if _login_item_app_exists "Acrobat Collaboration Synchronizer"; then
     echo "found"
 fi
@@ -1756,6 +1761,7 @@ EOF
 }
 
 @test "_login_item_app_exists trusts an existing System Events login item path" {
+	setup_login_item_fixture
 	local helper="$HOME/Applications/Adobe Acrobat DC.app/Contents/Helpers/AdobeResourceSynchronizer.app"
 	mkdir -p "$helper"
 
@@ -1763,11 +1769,6 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-mkdir -p "$HOME/bin"
-printf '#!/bin/bash\nexit 1\n' > "$HOME/bin/mdfind"
-chmod +x "$HOME/bin/mdfind"
-PATH="$HOME/bin:$PATH"
-sfltool() { return 1; }
 if _login_item_app_exists "Acrobat Collaboration Synchronizer" "$HELPER_PATH" 2>&1; then
     echo "found"
 fi
