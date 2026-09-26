@@ -1,26 +1,17 @@
 #!/usr/bin/env bats
+
+load helpers/common
+
 # Leaked automation-browser cleanup: only automation-profile processes are
 # touched, dry-run never kills, and in-use profiles are never deleted.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-automation-browsers.XXXXXX")"
-    export HOME
+    mole_test_setup_home automation-browsers
     mkdir -p "$HOME"
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 # Stub binaries: ps emits one playwright-cli session daemon (ppid 1 by design,

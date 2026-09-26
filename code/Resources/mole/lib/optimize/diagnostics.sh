@@ -368,7 +368,7 @@ run_optimize_diagnostics() {
     threshold=$(opt_diag_cpu_threshold)
 
     echo ""
-    echo -e "${BLUE}PERFORMANCE DIAGNOSIS${NC}"
+    echo -e "${BLUE}Performance diagnosis${NC}"
 
     local families="cloudshell syspolicyd windowserver spotlight coresim_disk_images"
     local sustained_count=0

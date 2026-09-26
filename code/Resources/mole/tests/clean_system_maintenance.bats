@@ -1,14 +1,9 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-system-clean.XXXXXX")"
-    export HOME
+    mole_test_setup_home system-clean
 
     # Prevent AppleScript permission dialogs during tests
     MOLE_TEST_MODE=1
@@ -18,12 +13,7 @@ setup_file() {
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 # clean_deep_system reaches its two /private/var/folders sweeps through
@@ -694,6 +684,77 @@ EOF
     [[ "$output" == *"Homebrew cleanup"* ]]
 }
 
+@test "clean_homebrew runs cleanup even when the download cache is small" {
+    # Old formula versions live in the Cellar, not in ~/Library/Caches/Homebrew,
+    # so a nearly empty cache said nothing about what cleanup would free. On
+    # the maintainer's Mac 881MB of 930MB was old Cellar versions.
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+
+mkdir -p "$HOME/.cache/mole" "$HOME/Library/Caches/Homebrew"
+rm -f "$HOME/.cache/mole/brew_last_cleanup"
+
+    start_inline_spinner(){ :; }
+    stop_inline_spinner(){ :; }
+    note_activity(){ :; }
+    run_with_timeout() {
+        shift
+        if [[ "$1" == "du" ]]; then
+            echo "1024 $3"
+            return 0
+        fi
+        "$@"
+    }
+    brew() {
+        case "$1" in
+            cleanup)
+                echo "Removing: /opt/homebrew/Cellar/node/24.1.0... (2,011 files, 88.5MB)"
+                echo "==> This operation has freed approximately 88.5MB of disk space."
+                return 0
+                ;;
+            *) return 0 ;;
+        esac
+    }
+
+    clean_homebrew
+    [[ -s "$HOME/.cache/mole/brew_last_cleanup" ]] || { echo "no timestamp after success"; exit 1; }
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Homebrew cleanup"* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_homebrew leaves no timestamp when cleanup times out" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+
+mkdir -p "$HOME/.cache/mole"
+rm -f "$HOME/.cache/mole/brew_last_cleanup"
+
+    start_inline_spinner(){ :; }
+    stop_inline_spinner(){ :; }
+    note_activity(){ :; }
+    run_with_timeout() {
+        shift
+        if [[ "$1" == "brew" && "$2" == "cleanup" ]]; then
+            return 124
+        fi
+        "$@"
+    }
+    brew() { return 0; }
+
+    clean_homebrew
+    [[ ! -e "$HOME/.cache/mole/brew_last_cleanup" ]] || { echo "a timed-out cleanup was stamped"; exit 1; }
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"timed out"* ]] || { echo "$output"; return 1; }
+}
+
 @test "clean_homebrew prevents cleanup from implicitly autoremoving formulae" {
     run /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -992,7 +1053,7 @@ EOF
     [[ "$output" == *"Homebrew links · restored 1 active executable(s)"* ]]
 }
 
-@test "clean_homebrew dry-run shows brew autoremove preview without removing formulae" {
+@test "clean_homebrew dry-run previews cleanup and autoremove without removing anything" {
     run /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
@@ -1000,6 +1061,7 @@ source "$PROJECT_ROOT/lib/clean/brew.sh"
 
 calls="$HOME/brew_dry_run_calls.log"
 : > "$calls"
+rm -f "$HOME/.cache/mole/brew_last_cleanup"
 
 DRY_RUN=true
 run_with_timeout() {
@@ -1010,13 +1072,22 @@ run_with_timeout() {
 }
 brew() {
     case "$*" in
+        "cleanup --prune=30 --dry-run")
+            echo "Warning: Skipping aom: most recent version 3.15.1 not installed"
+            echo "Would remove: /opt/homebrew/Cellar/openjdk/26.0.2.1 (549 files, 397.6MB)"
+            echo "Would remove: $HOME/Library/Caches/Homebrew/wimlib--1.14.5_1 (0B)"
+            echo "Would remove: $HOME/Library/Caches/Homebrew/bootsnap/d2fe (1,587 files, 14MB)"
+            echo "Would remove (empty directory): /opt/homebrew/share/man/man4"
+            echo "==> This operation would free approximately 411.6MB of disk space."
+            return 0
+            ;;
         "autoremove --dry-run")
             echo "==> Would autoremove 1 unneeded formula:"
             echo "python@3.14"
             return 0
             ;;
-        "autoremove")
-            echo "REAL_AUTOREMOVE"
+        "cleanup --prune=30" | "autoremove")
+            echo "REAL_BREW_WRITE:$*"
             return 0
             ;;
         *)
@@ -1029,13 +1100,79 @@ clean_homebrew
 cat "$calls"
 EOF
 
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Homebrew · would cleanup"* ]] || return 1
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Homebrew cleanup · would free 411.6MB"* ]] || return 1
+    [[ "$output" == *"    openjdk 26.0.2.1 · 397.6MB"* ]] || return 1
+    [[ "$output" == *"    ~/Library/Caches/Homebrew/bootsnap/d2fe · 14MB"* ]] || return 1
+    [[ "$output" != *"wimlib"* ]] || return 1
+    [[ "$output" != *"Skipping"* ]] || return 1
+    [[ "$output" != *"man4"* ]] || return 1
+    [[ "$output" != *"Homebrew · would cleanup"* ]] || return 1
     [[ "$output" == *"Homebrew autoremove would remove"* ]] || return 1
     [[ "$output" == *"python@3.14"* ]] || return 1
+    [[ "$output" == *"CALL:brew cleanup --prune=30 --dry-run"* ]] || return 1
     [[ "$output" == *"CALL:brew autoremove --dry-run"* ]] || return 1
-    [[ "$output" != *"CALL:brew cleanup --prune=30"* ]] || return 1
-    [[ "$output" != *"REAL_AUTOREMOVE"* ]]
+    [[ "$output" != *$'CALL:brew cleanup --prune=30\n'* ]] || return 1
+    [[ "$output" != *"REAL_BREW_WRITE"* ]]
+}
+
+@test "clean_homebrew dry-run previews nothing when the real run would skip" {
+    # The real run skips within 7 days of a finished cleanup, so the preview
+    # must not promise one.
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+
+mkdir -p "$HOME/.cache/mole"
+date +%s > "$HOME/.cache/mole/brew_last_cleanup"
+
+DRY_RUN=true
+brew() {
+    case "$*" in
+        "cleanup --prune=30 --dry-run")
+            echo "UNEXPECTED_CLEANUP_PREVIEW"
+            return 0
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+clean_homebrew
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"UNEXPECTED_CLEANUP_PREVIEW"* ]] || return 1
+    [[ "$output" != *"Homebrew cleanup"* ]] || return 1
+    [[ "$output" != *"would cleanup"* ]]
+}
+
+@test "clean_homebrew dry-run names the manual command when the cleanup preview times out" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+
+rm -f "$HOME/.cache/mole/brew_last_cleanup"
+DRY_RUN=true
+run_with_timeout() {
+    local duration="$1"
+    shift
+    if [[ "$*" == "brew cleanup --prune=30 --dry-run" ]]; then
+        return 124
+    fi
+    "$@"
+}
+brew() { return 0; }
+
+clean_homebrew
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Homebrew cleanup preview timed out · run "* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"brew cleanup --dry-run"*" manually"* ]]
 }
 
 @test "run_with_timeout succeeds without GNU timeout" {
@@ -2013,6 +2150,13 @@ date() {
     echo "1000"
 }
 export -f date
+
+# run_with_timeout hands its command to gtimeout, which execs a binary and
+# never sees the function mocks above; run it in-shell so they apply.
+run_with_timeout() {
+    shift
+    "$@"
+}
 
 execute_optimization spotlight_index_optimize
 EOF

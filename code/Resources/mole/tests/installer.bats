@@ -1,25 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-	PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-	export PROJECT_ROOT
-
-	ORIGINAL_HOME="${HOME:-}"
-	export ORIGINAL_HOME
-
-	HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-installers-home.XXXXXX")"
-	export HOME
-
-	mkdir -p "$HOME"
+	mole_test_setup_home installers-home
 }
 
 teardown_file() {
-	if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-		rm -rf "$HOME"
-	fi
-	if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-		export HOME="$ORIGINAL_HOME"
-	fi
+	mole_test_teardown_home
 }
 
 setup() {
@@ -56,7 +44,7 @@ setup() {
 @test "installer.sh accepts --dry-run option" {
 	run env HOME="$HOME" TERM="xterm-256color" "$PROJECT_ROOT/bin/installer.sh" --dry-run
 
-	[[ "$status" -eq 0 || "$status" -eq 2 ]]
+	[[ "$status" -eq 0 || "$status" -eq 2 ]] || return 1
 	[[ "$output" == *"DRY RUN MODE"* ]]
 }
 

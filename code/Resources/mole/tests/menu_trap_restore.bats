@@ -1,11 +1,13 @@
 #!/usr/bin/env bats
+
+load helpers/common
+
 # The paginated/simple selectors override EXIT/INT/TERM while they run.
 # They must restore the caller's traps on exit, or an outer handler (e.g.
 # bin/uninstall.sh's session-end operation-log writer) is silently dropped.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
+    mole_test_setup_project_root
 }
 
 @test "paginated_multi_select preserves the caller's EXIT trap" {

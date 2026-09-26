@@ -182,3 +182,9 @@ For releases, GitHub Actions builds architecture-specific binaries automatically
 5. Open PR targeting `main`
 
 CI will verify formatting, linting, and tests.
+
+## Licensing
+
+Mole is GPL-3.0, and that is the licence your contribution carries. There is no CLA. You keep your copyright and I get only what the licence gives me, which means I cannot put your code under a different one.
+
+I also sell a closed-source Mac app at [mole.fit](https://mole.fit). It is a separate codebase rather than a build of this one, and neither program calls the other. What the two share is what anyone can observe about macOS: where a cache lives, what an app leaves behind. If you would rather not contribute alongside a paid product, that is a fair call, and I would rather you made it now than later.

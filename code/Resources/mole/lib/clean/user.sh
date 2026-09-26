@@ -256,7 +256,7 @@ _incomplete_download_delete_guard_allows() {
 
     local open_state=0
     _mole_paths_have_open_handle "$path" || open_state=$?
-    if [[ $open_state -eq 124 || $open_state -ge 128 ]]; then
+    if mole_rc_timeout_or_signal "$open_state"; then
         _mole_record_clean_cancellation "$open_state"
         return "$open_state"
     fi
@@ -289,7 +289,7 @@ _clean_incomplete_downloads() {
             [[ -e "$f" ]] || continue
             local open_state=0
             _mole_paths_have_open_handle "$f" || open_state=$?
-            if [[ $open_state -eq 124 || $open_state -ge 128 ]]; then
+            if mole_rc_timeout_or_signal "$open_state"; then
                 _mole_record_clean_cancellation "$open_state"
                 return 0
             fi
@@ -306,7 +306,7 @@ _clean_incomplete_downloads() {
             local guarded_rc=0
             safe_clean_guarded _incomplete_download_delete_guard_allows \
                 "$f" "$label" || guarded_rc=$?
-            if [[ $guarded_rc -eq 124 || $guarded_rc -ge 128 ]]; then
+            if mole_rc_timeout_or_signal "$guarded_rc"; then
                 _mole_record_clean_cancellation "$guarded_rc"
                 return 0
             fi
@@ -591,9 +591,7 @@ _clean_chromium_old_versions() {
             line_color=$(cleanup_result_color_kb "$total_size")
             echo -e "  ${line_color}${ICON_SUCCESS}${NC} ${label} old versions${NC} · ${line_color}${cleaned_count} dirs, $size_human${NC}"
         fi
-        files_cleaned=$((files_cleaned + cleaned_count))
-        total_size_cleaned=$((total_size_cleaned + total_size))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
     fi
     if [[ -n "$stopped_reason" ]]; then
@@ -834,9 +832,7 @@ clean_edge_updater_old_versions() {
             line_color=$(cleanup_result_color_kb "$total_size")
             echo -e "  ${line_color}${ICON_SUCCESS}${NC} Edge updater old versions${NC} · ${line_color}${cleaned_count} dirs, $size_human${NC}"
         fi
-        files_cleaned=$((files_cleaned + cleaned_count))
-        total_size_cleaned=$((total_size_cleaned + total_size))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
     fi
     if [[ -n "$stopped_reason" ]]; then
@@ -1051,9 +1047,7 @@ clean_app_caches() {
                 echo -e "  ${line_color}${ICON_SUCCESS}${NC} Sandboxed app caches${NC} · ${line_color}$size_human${NC}"
             fi
         fi
-        files_cleaned=$((files_cleaned + cleaned_count))
-        total_size_cleaned=$((total_size_cleaned + total_size))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
     fi
 
@@ -1114,9 +1108,7 @@ clean_handoff_pasteboard_cache() {
         line_color=$(cleanup_result_color_kb "$total_kb")
         echo -e "  ${line_color}${ICON_SUCCESS}${NC} Handoff clipboard cache${NC} · ${line_color}$size_human${NC}"
     fi
-    files_cleaned=$((files_cleaned + cleaned_count))
-    total_size_cleaned=$((total_size_cleaned + total_kb))
-    total_items=$((total_items + 1))
+    mole_add_cleaned_row "$cleaned_count" "$total_kb"
     note_activity
 }
 
@@ -1410,9 +1402,7 @@ clean_group_container_caches() {
                 echo -e "  ${line_color}${ICON_SUCCESS}${NC} Group Containers logs/caches${NC} · ${line_color}$size_human${NC}"
             fi
         fi
-        files_cleaned=$((files_cleaned + cleaned_count))
-        total_size_cleaned=$((total_size_cleaned + total_size))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
     fi
 }
@@ -1568,7 +1558,7 @@ clean_external_volume_target() {
     if [[ $metadata_scan_rc -ne 0 ]]; then
         : > "$metadata_scan_file" || true
         stop_section_spinner
-        if [[ $metadata_scan_rc -eq 124 ]]; then
+        if mole_rc_timeout "$metadata_scan_rc"; then
             echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}scan timed out, no changes${NC}"
         elif [[ $metadata_scan_rc -ge 128 ]]; then
             echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}scan interrupted, no changes${NC}"
@@ -1681,9 +1671,7 @@ clean_external_volume_target() {
             line_color=$(cleanup_result_color_kb "$total_size")
             echo -e "  ${line_color}${ICON_SUCCESS}${NC} External volume cleanup${NC} · ${line_color}${volume_name}, $size_human${NC}"
         fi
-        files_cleaned=$((files_cleaned + cleaned_count))
-        total_size_cleaned=$((total_size_cleaned + total_size))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
     fi
 
@@ -2477,9 +2465,7 @@ clean_application_support_logs() {
                 echo -e "  ${line_color}${ICON_SUCCESS}${NC} Application Support logs/caches${NC} · ${line_color}$size_human${NC}"
             fi
         fi
-        files_cleaned=$((files_cleaned + cleaned_count))
-        total_size_cleaned=$((total_size_cleaned + total_size_kb))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size_kb"
         note_activity
     fi
 }
@@ -2563,9 +2549,7 @@ clean_cached_device_firmware() {
             line_color=$(cleanup_result_color_kb "$total_size_kb")
             echo -e "  ${line_color}${ICON_SUCCESS}${NC} Cached device firmware${NC} · ${line_color}${cleaned_count} files, $size_human${NC}"
         fi
-        files_cleaned=$((files_cleaned + cleaned_count))
-        total_size_cleaned=$((total_size_cleaned + total_size_kb))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size_kb"
         note_activity
     fi
 }
@@ -2625,6 +2609,34 @@ report_agent_worktree_candidates() {
         done < <(run_with_timeout "$MOLE_TIMEOUT_PKG_CLEANUP_SEC" command find "$root" -maxdepth 6 -type d -path "*/.claude/worktrees" -prune -print0 2> /dev/null)
     done
     return 0
+}
+
+# One `docker system df` row for the Large files Docker line. Docker's
+# Reclaimable is swapped for the active/total count when it contradicts the
+# row's own counts: something reclaimable while every item is in use, or all
+# images reclaimable while a container still uses one. Engine 29.0 through
+# 29.3 reports in-use images as reclaimable (moby/moby#51775), and older
+# clients count shared layers of in-use images the same way. Rows whose
+# counts do not parse keep Docker's text.
+docker_df_review_segment() {
+    local type="$1"
+    local size="$2"
+    local reclaimable="$3"
+    local total="$4"
+    local active="$5"
+    local contradicts=false
+    if [[ "$total" =~ ^[0-9]+$ && "$active" =~ ^[0-9]+$ ]]; then
+        if [[ $total -gt 0 && $active -eq $total && "$reclaimable" != 0B* ]]; then
+            contradicts=true
+        elif [[ "$type" == "Images" && $active -gt 0 && "$reclaimable" == *"(100%)"* ]]; then
+            contradicts=true
+        fi
+    fi
+    if [[ "$contradicts" == "true" ]]; then
+        printf '%s %s (%s/%s in use)\n' "$type" "$size" "$active" "$total"
+    else
+        printf '%s %s (%s reclaimable)\n' "$type" "$size" "$reclaimable"
+    fi
 }
 
 # Large file candidates (report only, no deletion).
@@ -2772,12 +2784,14 @@ check_large_file_candidates() {
     local docker_reported=false
     if command -v docker > /dev/null 2>&1; then
         local docker_output
-        docker_output=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" docker system df --format '{{.Type}}\t{{.Size}}\t{{.Reclaimable}}' 2> /dev/null || true)
+        # The counts go last: tab is IFS whitespace, so an empty trailing
+        # field cannot shift Size or Reclaimable out of place.
+        docker_output=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" docker system df --format '{{.Type}}\t{{.Size}}\t{{.Reclaimable}}\t{{.TotalCount}}\t{{.Active}}' 2> /dev/null || true)
         if [[ -n "$docker_output" ]]; then
             local docker_detail=""
-            while IFS=$'\t' read -r dtype dsize dreclaim; do
+            while IFS=$'\t' read -r dtype dsize dreclaim dtotal dactive; do
                 [[ -z "$dtype" ]] && continue
-                docker_detail+="${docker_detail:+ · }${dtype} ${dsize} (${dreclaim} reclaimable)"
+                docker_detail+="${docker_detail:+ · }$(docker_df_review_segment "$dtype" "$dsize" "$dreclaim" "$dtotal" "$dactive")"
             done <<< "$docker_output"
             if [[ -n "$docker_detail" ]]; then
                 stop_section_spinner

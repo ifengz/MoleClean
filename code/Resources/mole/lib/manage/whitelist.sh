@@ -6,7 +6,7 @@ set -euo pipefail
 
 optimize_whitelist_pattern_is_retired() {
     case "$1" in
-        dock_refresh | memory_pressure_relief) return 0 ;;
+        dock_refresh | memory_pressure_relief | launch_services_rebuild) return 0 ;;
         *) return 1 ;;
     esac
 }

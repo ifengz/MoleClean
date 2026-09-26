@@ -1,25 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-home.XXXXXX")"
-    export HOME
-
-    mkdir -p "$HOME"
+    mole_test_setup_home home
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 setup() {
@@ -835,8 +823,11 @@ EOF
         ' > /dev/null 2>&1
 
     raw_content="$(cat "$raw")"
-    [[ "$raw_content" == *"Scanning items... 5/10"* ]] || return 1
-    [[ "$raw_content" == *"PID_STABLE"* ]] || return 1
+    # This case failed once on a CI runner and could not be reproduced in
+    # about 70 local runs; print the PTY capture so the next failure explains
+    # itself instead of being retuned blind.
+    [[ "$raw_content" == *"Scanning items... 5/10"* ]] || { cat -v "$raw"; return 1; }
+    [[ "$raw_content" == *"PID_STABLE"* ]] || { cat -v "$raw"; return 1; }
 }
 
 @test "safe_clear_lines emits the same erase sequence per line to the target device" {

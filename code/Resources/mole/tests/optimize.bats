@@ -1,25 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-	PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-	export PROJECT_ROOT
-
-	ORIGINAL_HOME="${HOME:-}"
-	export ORIGINAL_HOME
-
-	HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-optimize.XXXXXX")"
-	export HOME
-
-	mkdir -p "$HOME"
+	mole_test_setup_home optimize
 }
 
 teardown_file() {
-	if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-		rm -rf "$HOME"
-	fi
-	if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-		export HOME="$ORIGINAL_HOME"
-	fi
+	mole_test_teardown_home
 }
 
 @test "needs_permissions_repair returns true when home owner differs" {
@@ -1009,24 +997,6 @@ EOF
 	[[ "$output" == *"pruned"* ]]
 }
 
-@test "opt_launch_services_rebuild handles missing lsregister without exiting" {
-	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-get_lsregister_path() {
-    echo ""
-    return 0
-}
-execute_optimization launch_services_rebuild
-echo "survived"
-EOF
-
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"lsregister not found"* ]] || return 1
-	[[ "$output" == *"survived"* ]]
-}
-
 @test "opt_launch_agents_cleanup reports healthy when no directory" {
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=1 /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
@@ -1039,8 +1009,19 @@ EOF
 	[[ "$output" == *"Launch Agents all healthy"* ]]
 }
 
-@test "opt_launch_agents_cleanup detects broken agents" {
-	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=1 /bin/bash --noprofile --norc <<'EOF'
+@test "opt_launch_agents_cleanup reports broken agents and leaves them in place" {
+	# launchctl is a PATH stub rather than a shell function: run_with_timeout
+	# execs an external timeout binary that never sees shell functions, so a
+	# function mock could not observe a reintroduced unload. Real mode, not
+	# dry-run, because the removed unload path returned early under dry-run.
+	local stub_dir="$HOME/launchctl-stub-bin"
+	local trace="$HOME/launchctl.trace"
+	mkdir -p "$stub_dir"
+	rm -f "$trace"
+	printf '#!/bin/bash\necho "$*" >> "%s"\n' "$trace" > "$stub_dir/launchctl"
+	chmod +x "$stub_dir/launchctl"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$stub_dir:$PATH" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
@@ -1060,12 +1041,18 @@ cat > "$HOME/Library/LaunchAgents/com.test.broken.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-safe_remove() { return 0; }
+# The audit must never unload or remove the agent (#1617).
+safe_remove() { echo "SAFE_REMOVE $1"; return 0; }
 execute_optimization launch_agents_cleanup
+[[ -f "$HOME/Library/LaunchAgents/com.test.broken.plist" ]] || { echo "PLIST_GONE"; exit 1; }
 EOF
 
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"Cleaned 1 broken Launch Agent"* ]]
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"Launch Agent com.test.broken: program missing at /nonexistent/binary"* ]] || return 1
+	[[ "$output" == *"left in ~/Library/LaunchAgents"* ]] || return 1
+	[[ "$output" != *"SAFE_REMOVE"* ]] || return 1
+	[[ ! -s "$trace" ]] || { cat "$trace"; return 1; }
+	[[ "$output" != *"Cleaned"* ]]
 }
 
 @test "opt_launch_agents_cleanup skips healthy agents" {

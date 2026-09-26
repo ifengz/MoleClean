@@ -1,10 +1,16 @@
 ---
-name: Bug Report
-about: Report a bug or issue with Mole
+name: CLI Bug Report
+about: Report a bug in the Mole command-line tool
 title: '[BUG] '
 labels: bug
 assignees: ''
 ---
+
+## Before submitting
+
+Run `mo update` to install the latest stable version, then check `mo --version`. Reproduce the problem with that version. If updating itself fails, report that failure and your installed version.
+
+- [ ] I updated and reproduced the problem, or this report explains why I cannot update.
 
 ## Describe the bug
 
@@ -42,7 +48,7 @@ Paste the debug output here
 
 ## Environment
 
-Please run `mo update` to ensure you are on the latest version, then paste the output of `mo --version` below:
+Paste the output of `mo --version` from the version used to reproduce the problem:
 
 ```text
 Paste mo --version output here

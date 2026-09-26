@@ -1773,20 +1773,28 @@ perform_update() {
     echo -e "${GREEN}${ICON_SUCCESS}${NC} Updated to latest version, $updated_version"
 }
 
-parse_args "$@"
-normalize_install_dir || {
-    log_error "Could not resolve the installation directory: $INSTALL_DIR"
-    exit 1
+main() {
+    parse_args "$@"
+    normalize_install_dir || {
+        log_error "Could not resolve the installation directory: $INSTALL_DIR"
+        exit 1
+    }
+
+    trap 'cleanup_installer' EXIT
+    trap 'cleanup_installer; exit 130' INT TERM
+
+    case "$ACTION" in
+        update)
+            perform_update
+            ;;
+        *)
+            perform_install
+            ;;
+    esac
 }
 
-trap 'cleanup_installer' EXIT
-trap 'cleanup_installer; exit 130' INT TERM
-
-case "$ACTION" in
-    update)
-        perform_update
-        ;;
-    *)
-        perform_install
-        ;;
-esac
+# Dispatch when executed, directly or as `bash install.sh`, and when piped
+# (`curl ... | bash`, where BASH_SOURCE[0] is empty). Sourcing only loads
+# definitions for tests. Kept as the final line so a truncated download never
+# reaches main.
+[[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]] || main "$@"

@@ -1,31 +1,18 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 # Safety boundary tests for find_app_files() and ByHost cleanup.
 # These guard against regressions where uninstalling a developer toolchain
 # would silently delete user project source, signing keys, OAuth tokens,
 # or other manually-curated data.
 
 setup_file() {
-	PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-	export PROJECT_ROOT
-
-	ORIGINAL_HOME="${BATS_TMPDIR:-}"
-	if [[ -z "$ORIGINAL_HOME" ]]; then
-		ORIGINAL_HOME="${HOME:-}"
-	fi
-	export ORIGINAL_HOME
-
-	HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-uninstall-safety-home.XXXXXX")"
-	export HOME
+	mole_test_setup_home uninstall-safety-home
 }
 
 teardown_file() {
-	if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-		rm -rf "$HOME"
-	fi
-	if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-		export HOME="$ORIGINAL_HOME"
-	fi
+	mole_test_teardown_home
 }
 
 setup() {
@@ -374,6 +361,8 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+# Homebrew is present but owns no cask; the real brew is never consulted.
+brew() { :; }
 
 trace="$HOME/mole_delete.log"
 mole_delete() {
@@ -426,6 +415,8 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+# Homebrew is present but owns no cask; the real brew is never consulted.
+brew() { :; }
 
 trace="$HOME/side_effects.log"
 

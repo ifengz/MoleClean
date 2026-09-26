@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-	PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-	export PROJECT_ROOT
+	mole_test_setup_project_root
 
 	TEST_HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-optimize-summary.XXXXXX")"
 	export TEST_HOME
@@ -15,6 +16,8 @@ teardown_file() {
 }
 
 @test "optimize dry-run summary reports outcomes instead of catalog size" {
+	# The dry run probes Spotlight; answer without reading the real index.
+	mole_test_fake_command mdfind
 	run env HOME="$TEST_HOME" MOLE_TEST_NO_AUTH=1 MOLE_ASSUME_VPN_ACTIVE=0 NO_COLOR=1 "$PROJECT_ROOT/mole" optimize --dry-run
 
 	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }

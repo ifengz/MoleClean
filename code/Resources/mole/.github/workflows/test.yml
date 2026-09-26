@@ -78,12 +78,19 @@ jobs:
           BATS_FORMATTER: tap
           LANG: en_US.UTF-8
           LC_ALL: en_US.UTF-8
+        # clean_app_caches.bats is here because it is the suite that reads
+        # system tool output whose format varies by macOS version, which the
+        # full run on macos-latest cannot see. tw93/Mole#1512 was reported on
+        # macOS 15, fixed, then silently regressed for eight days with CI green
+        # the whole time, because that file was not in this subset. It adds
+        # about 16s to a job that runs in 90s under a 30 minute budget.
         run: |
           bats tests/core_safe_functions.bats \
                tests/core_common.bats \
                tests/core_timeout.bats \
                tests/regression.bats \
-               tests/cli.bats
+               tests/cli.bats \
+               tests/clean_app_caches.bats
 
   security:
     name: Security Checks

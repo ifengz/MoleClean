@@ -1,14 +1,9 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-brew-uninstall-home.XXXXXX")"
-    export HOME
+    mole_test_setup_home brew-uninstall-home
 
     # Prevent AppleScript permission dialogs during tests
     MOLE_TEST_MODE=1
@@ -16,12 +11,7 @@ setup_file() {
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 setup() {

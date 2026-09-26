@@ -1,12 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 # Tests for remove_file_list batching in lib/uninstall/batch.sh.
 # Exercises the batched Trash path (single _mole_move_to_trash_batch call for
 # eligible files) and the fallback when the batch helper fails.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
+    mole_test_setup_project_root
 }
 
 setup() {
@@ -51,10 +52,10 @@ remove_file_list "$list" "false"
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"0"* ]]
-    [[ -f "$HOME/.Local/bin/unrelated-cli" ]]
-    [[ -f "$HOME/.Config/unrelated-config" ]]
-    [[ -f "$HOME/.Cache/unrelated-cache" ]]
+    [[ "$output" == *"0"* ]] || return 1
+    [[ -f "$HOME/.Local/bin/unrelated-cli" ]] || return 1
+    [[ -f "$HOME/.Config/unrelated-config" ]] || return 1
+    [[ -f "$HOME/.Cache/unrelated-cache" ]] || return 1
     [[ ! -d "$MOLE_TEST_TRASH_DIR" ]]
 }
 
@@ -129,6 +130,9 @@ EOF
 	run env PROJECT_ROOT="$PROJECT_ROOT" PS_COUNT="$ps_count" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 ps() {
+	# One snapshot is a table read plus an executable-path read; count and
+	# answer only the table read.
+	[[ "$*" == *comm=* ]] && return 0
 	printf 'x' >> "$PS_COUNT"
 	local calls
 	calls=$(wc -c < "$PS_COUNT" | tr -d ' ')

@@ -1,12 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 # Tests for mole_delete in lib/core/file_ops.sh.
 # Exercises permanent mode (default), trash mode (via MOLE_TEST_TRASH_DIR
 # so Finder is never invoked), dry-run, and the deletions log.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
+    mole_test_setup_project_root
 }
 
 setup() {

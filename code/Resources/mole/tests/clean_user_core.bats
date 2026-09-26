@@ -1,14 +1,9 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-user-core.XXXXXX")"
-    export HOME
+    mole_test_setup_home user-core
 
     # Prevent AppleScript permission dialogs during tests
     MOLE_TEST_MODE=1
@@ -27,12 +22,7 @@ setup_file() {
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 @test "browser old-version cleaners stay inside the fixture HOME" {
@@ -256,6 +246,49 @@ EOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" != *"User app cache|$test_home/Library/Caches/deno"* ]] || return 1
     [[ "$output" == *"User app cache|$test_home/Library/Caches/ordinary-app"* ]] || return 1
+    rm -rf "$test_home"
+}
+
+@test "clean_user_essentials keeps Google identity and Clearcut state (#1607)" {
+    # The generic cache sweep reaches these dotless names. Drive the real
+    # safe_clean_guarded path so should_protect_path at bin/clean.sh:1002
+    # decides the batch.
+    local test_home="$HOME/google-identity-home"
+    mkdir -p \
+        "$test_home/Library/Caches/GIPPseudonymousID" \
+        "$test_home/Library/Caches/CCTClearcutLogger" \
+        "$test_home/Library/Caches/ordinary-app"
+    printf 'id\n' > "$test_home/Library/Caches/GIPPseudonymousID/device-id"
+    printf 'log\n' > "$test_home/Library/Caches/CCTClearcutLogger/queue.dat"
+    printf 'junk\n' > "$test_home/Library/Caches/ordinary-app/junk"
+
+    run env HOME="$test_home" PROJECT_ROOT="$PROJECT_ROOT" \
+        MOLE_TEST_MODE=1 MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+clean_trash() { :; }
+_clean_recent_items() { :; }
+_clean_mail_downloads() { :; }
+clean_rc=0
+clean_user_essentials || clean_rc=$?
+gip="$HOME/Library/Caches/GIPPseudonymousID"
+clearcut="$HOME/Library/Caches/CCTClearcutLogger"
+ordinary="$HOME/Library/Caches/ordinary-app"
+printf 'CLEAN_RC=%s GIP=%s CCT=%s ORD=%s\n' \
+    "$clean_rc" \
+    "$(test -d "$gip" && echo kept || echo gone)" \
+    "$(test -d "$clearcut" && echo kept || echo gone)" \
+    "$(test -e "$ordinary" && echo kept || echo gone)"
+[[ -d "$gip" ]] || exit 1
+[[ -d "$clearcut" ]] || exit 1
+[[ ! -e "$ordinary" ]] || exit 1
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     rm -rf "$test_home"
 }
 
@@ -607,7 +640,7 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"Trash · removed 1 items, 1 could not be removed"* ]] || return 1
-    [[ -e "$HOME/.Trash/two.tmp" ]]
+    [[ -e "$HOME/.Trash/two.tmp" ]] || return 1
     [[ ! -e "$HOME/.Trash/one.tmp" ]]
 }
 
@@ -635,8 +668,8 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"Trash · emptied, 3 items"* ]] || return 1
-    [[ ! -e "$HOME/.Trash/com.sogou.inputmethod.sogou.plist" ]]
-    [[ ! -e "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist" ]]
+    [[ ! -e "$HOME/.Trash/com.sogou.inputmethod.sogou.plist" ]] || return 1
+    [[ ! -e "$HOME/.Trash/com.tencent.inputmethod.QQInput.plist" ]] || return 1
     [[ ! -d "$HOME/.Trash/Input Methods" ]]
 }
 
@@ -2647,6 +2680,135 @@ EOF
         return 1
     }
     [[ "$output" != *"Xcode DerivedData"* ]] || {
+        echo "$output"
+        return 1
+    }
+}
+
+# Runs Large files against a docker stub that renders whatever
+# `system df --format` template production asks for, from rows of
+# Type|TotalCount|Active|Size|Reclaimable. The caller reads the Docker line
+# out of `output` with `_docker_row`.
+_large_files_docker_row() {
+    local review_home="$1"
+    local rows="$2"
+    mkdir -p "$review_home"
+
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" DOCKER_DF_ROWS="$rows" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+defaults() { return 1; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+docker() {
+    [[ "${1:-} ${2:-}" == "system df" && "${3:-}" == "--format" ]] || return 1
+    local type total active size reclaimable line
+    while IFS='|' read -r type total active size reclaimable; do
+        line="$4"
+        line=${line//'{{.Type}}'/$type}
+        line=${line//'{{.TotalCount}}'/$total}
+        line=${line//'{{.Active}}'/$active}
+        line=${line//'{{.Size}}'/$size}
+        line=${line//'{{.Reclaimable}}'/$reclaimable}
+        line=${line//'\t'/$'\t'}
+        printf '%s\n' "$line"
+    done <<< "$DOCKER_DF_ROWS"
+}
+check_large_file_candidates
+EOF
+}
+
+_docker_row() {
+    printf '%s\n' "$1" | grep 'Docker storage' || true
+}
+
+@test "large files Docker row drops an in-use images reclaimable (moby#51775)" {
+    # Colima on Engine 29.2 with the containerd image store: both images back
+    # a container, yet the daemon calls all of them reclaimable.
+    _large_files_docker_row "$HOME/large-review-docker-containerd" \
+        "Images|2|2|7.093GB|7.093GB (100%)
+Containers|2|1|846.3MB|3.658MB (0%)
+Local Volumes|7|7|65.76MB|0B (0%)
+Build Cache|0|0|0B|0B"
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    local docker_row
+    docker_row=$(_docker_row "$output")
+    [[ "$docker_row" == *"Images 7.093GB (2/2 in use) · Containers 846.3MB (3.658MB (0%) reclaimable) · Local Volumes 65.76MB (0B (0%) reclaimable) · Build Cache 0B (0B reclaimable)"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$docker_row" != *"(100%)"* ]] || {
+        echo "$docker_row"
+        return 1
+    }
+}
+
+@test "large files Docker row drops a 100% images reclaimable while one image is in use" {
+    # Same daemon bug with only part of the images in use: 100% is still
+    # impossible, because the image a container runs keeps its layers.
+    _large_files_docker_row "$HOME/large-review-docker-partial" \
+        "Images|3|1|4.2GB|4.2GB (100%)
+Containers|1|1|12MB|0B (0%)"
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    local docker_row
+    docker_row=$(_docker_row "$output")
+    [[ "$docker_row" == *"Images 4.2GB (1/3 in use) · Containers 12MB (0B (0%) reclaimable)"* ]] || {
+        echo "$output"
+        return 1
+    }
+}
+
+@test "large files Docker row drops a reclaimable figure when every item is in use" {
+    # Older clients count the shared layers of in-use images as reclaimable,
+    # though no prune can free them while every image backs a container.
+    _large_files_docker_row "$HOME/large-review-docker-shared" \
+        "Images|3|3|2.8GB|1.1GB (39%)"
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    local docker_row
+    docker_row=$(_docker_row "$output")
+    [[ "$docker_row" == *"Images 2.8GB (3/3 in use)"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$docker_row" != *"reclaimable"* ]] || {
+        echo "$docker_row"
+        return 1
+    }
+}
+
+@test "large files Docker row keeps reclaimable figures that agree with the active counts" {
+    _large_files_docker_row "$HOME/large-review-docker-classic" \
+        "Images|2|0|2.5GB|2.5GB (100%)
+Containers|3|1|40MB|12MB (30%)
+Local Volumes|2|1|300MB|100MB (33%)
+Build Cache|12|0|1.2GB|1.2GB"
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    local docker_row
+    docker_row=$(_docker_row "$output")
+    [[ "$docker_row" == *"Images 2.5GB (2.5GB (100%) reclaimable) · Containers 40MB (12MB (30%) reclaimable) · Local Volumes 300MB (100MB (33%) reclaimable) · Build Cache 1.2GB (1.2GB reclaimable)"* ]] || {
         echo "$output"
         return 1
     }

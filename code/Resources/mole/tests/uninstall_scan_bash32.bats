@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 # Regression for #863: "Can't Open App List, Scanning forever."
 #
 # macOS ships /bin/bash 3.2 (Apple does not upgrade past it, GPLv3). The
@@ -18,8 +20,7 @@
 # "app_data_tuples[@]: unbound variable".
 
 setup_file() {
-	PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-	export PROJECT_ROOT
+	mole_test_setup_project_root
 }
 
 setup() {

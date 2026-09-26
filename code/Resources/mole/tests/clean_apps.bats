@@ -1,14 +1,9 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-apps-module.XXXXXX")"
-    export HOME
+    mole_test_setup_home apps-module
 
     # Prevent AppleScript permission dialogs during tests
     MOLE_TEST_MODE=1
@@ -18,12 +13,7 @@ setup_file() {
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 @test "clean_ds_store_tree reports dry-run summary" {
@@ -628,7 +618,7 @@ EOF
     rm -rf "$scan_home"
     mkdir -p "$scan_home"
 
-    run env HOME="$scan_home" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 /bin/bash --noprofile --norc <<'EOF'
+    run env HOME="$scan_home" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 MO_DEBUG=1 /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/apps.sh"
@@ -674,7 +664,12 @@ printf 'ERREXIT_SCAN_FAILURE_CLOSED\n'
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Skipped: Unable to scan installed applications (Broken.app)"* ]] || return 1
+    # The full path, home shortened, is what lets the user find a bundle that
+    # lives outside /Applications, such as a Caskroom staging copy. --debug
+    # lists every failing path, not just the first.
+    [[ "$output" == *"Skipped: Unable to scan installed applications (~/Applications/Broken.app)"* ]] || return 1
+    [[ "$output" != *"(Broken.app)"* ]] || return 1
+    [[ "$output" == *"Unreadable application bundle: $scan_home/Applications/Broken.app"* ]] || return 1
     [[ "$output" == *"ERREXIT_SCAN_FAILURE_CLOSED"* ]]
 }
 
@@ -728,6 +723,8 @@ EOF
 }
 
 @test "is_bundle_orphaned returns true for old uninstalled bundle" {
+    # Spotlight has no app for this bundle id; the real index is never read.
+    mole_test_fake_command mdfind
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ORPHAN_AGE_THRESHOLD=30 /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
@@ -1464,6 +1461,8 @@ EOF
 }
 
 @test "clean_orphaned_system_services respects dry-run" {
+    # Spotlight has no app for this bundle id; the real index is never read.
+    mole_test_fake_command mdfind
     # Without MOLE_TEST_MODE=0 the sweep early-returns under setup_file's
     # MOLE_TEST_MODE=1, leaving $output empty and both negative assertions true.
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 DRY_RUN=true MOLE_DRY_RUN=1 /bin/bash --noprofile --norc <<'EOF'
@@ -2077,6 +2076,8 @@ EOF
 }
 
 @test "clean_orphaned_system_services does not count protected skips as cleaned" {
+    # Spotlight has no app for this bundle id; the real index is never read.
+    mole_test_fake_command mdfind
     # setup_file exports MOLE_TEST_MODE=1, under which clean_orphaned_system_services
     # returns immediately and leaves $output empty. Override it as the sibling cases do.
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 DRY_RUN=false MOLE_DRY_RUN=0 /bin/bash --noprofile --norc <<'EOF'

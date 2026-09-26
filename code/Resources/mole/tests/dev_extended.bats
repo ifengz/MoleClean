@@ -1,25 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-dev-extended.XXXXXX")"
-    export HOME
-
-    mkdir -p "$HOME"
+    mole_test_setup_home dev-extended
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 @test "clean_dev_elixir cleans hex cache" {
@@ -2617,15 +2605,19 @@ EOF
     [[ "$output" != *"removed 1"* ]] || return 1
 }
 
-@test "clean_dev_mobile stops before simctl delete when unavailable-device sizing times out" {
-    local case_home="$HOME/simctl-size-timeout"
+@test "clean_dev_mobile deletes unavailable devices through a size timeout and stops on a signal" {
+    # Sizing only feeds the freed total (bugs reference, section 15): a timeout
+    # still reaches simctl delete with a partial total, a signal stops first.
     local udid="ABCDEF01-2345-6789-ABCD-EF0123456789"
-    mkdir -p "$case_home/Library/Developer/CoreSimulator/Devices/$udid"
+    local size_status case_home
+    for size_status in 124 130; do
+        case_home="$HOME/simctl-size-$size_status"
+        mkdir -p "$case_home/Library/Developer/CoreSimulator/Devices/$udid"
 
-    run env HOME="$case_home" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false \
-        MOLE_CURRENT_COMMAND=clean MOLE_CLEAN_CANCEL_STATUS=0 \
-        SIMCTL_CALL_LOG="$case_home/simctl-calls.log" \
-        /bin/bash --noprofile --norc << 'EOF'
+        run env HOME="$case_home" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false \
+            MOLE_CURRENT_COMMAND=clean MOLE_CLEAN_CANCEL_STATUS=0 MOLE_CLEAN_SIZING_TIMEOUTS=0 \
+            SIMCTL_CALL_LOG="$case_home/simctl-calls.log" SIZE_STATUS="$size_status" \
+            /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/dev.sh"
@@ -2654,22 +2646,24 @@ _run_simctl() {
     esac
     return 1
 }
-get_path_size_kb() { return 124; }
+get_path_size_kb() { return "$SIZE_STATUS"; }
 
-set +e
-clean_dev_mobile
-rc=$?
-set -e
-printf 'RC=%s CANCEL=%s\n' "$rc" "$MOLE_CLEAN_CANCEL_STATUS"
-[[ $rc -eq 124 && $MOLE_CLEAN_CANCEL_STATUS -eq 124 ]]
+rc=0
+clean_dev_mobile || rc=$?
+printf 'RC=%s CANCEL=%s PARTIAL=%s\n' "$rc" "$MOLE_CLEAN_CANCEL_STATUS" "$MOLE_CLEAN_SIZING_TIMEOUTS"
 EOF
 
-    [ "$status" -eq 0 ] || return 1
-    [[ "$output" == *"RC=124 CANCEL=124"* ]] || return 1
-    [[ -f "$case_home/simctl-calls.log" ]] || return 1
-    if grep -q '^delete unavailable$' "$case_home/simctl-calls.log"; then
-        return 1
-    fi
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        if [[ "$size_status" == 124 ]]; then
+            [[ "$output" == *"RC=0 CANCEL=0 PARTIAL=1"* ]] || { echo "$output"; return 1; }
+            grep -q '^delete unavailable$' "$case_home/simctl-calls.log" || return 1
+        else
+            [[ "$output" == *"RC=130 CANCEL=130"* ]] || { echo "$output"; return 1; }
+            if grep -q '^delete unavailable$' "$case_home/simctl-calls.log"; then
+                return 1
+            fi
+        fi
+    done
 }
 
 @test "clean_dev_ai_agents protects the copilot version pointed at by ~/.local/bin/copilot" {
