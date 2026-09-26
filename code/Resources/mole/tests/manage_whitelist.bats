@@ -1,25 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-whitelist-home.XXXXXX")"
-    export HOME
-
-    mkdir -p "$HOME"
+    mole_test_setup_home whitelist-home
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 setup() {
@@ -128,24 +116,27 @@ setup() {
 @test "optimize whitelist ignores and does not resave removed task ids" {
     local optimize_path="$HOME/.config/mole/whitelist_optimize"
     mkdir -p "$(dirname "$optimize_path")"
-    printf 'dock_refresh\nmemory_pressure_relief\ncache_refresh\n' > "$optimize_path"
+    printf 'dock_refresh\nmemory_pressure_relief\nlaunch_services_rebuild\ncache_refresh\n' > "$optimize_path"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/manage/whitelist.sh"
 load_whitelist optimize
 printf 'loaded:%s\n' "${CURRENT_WHITELIST_PATTERNS[@]}"
-save_whitelist_patterns optimize dock_refresh memory_pressure_relief cache_refresh
+save_whitelist_patterns optimize dock_refresh memory_pressure_relief launch_services_rebuild cache_refresh
 EOF
 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"loaded:cache_refresh"* ]] || return 1
     [[ "$output" != *"loaded:dock_refresh"* ]] || return 1
     [[ "$output" != *"loaded:memory_pressure_relief"* ]] || return 1
+    [[ "$output" != *"loaded:launch_services_rebuild"* ]] || return 1
     grep -qFx 'cache_refresh' "$optimize_path"
     run grep -qFx 'dock_refresh' "$optimize_path"
     [ "$status" -eq 1 ]
     run grep -qFx 'memory_pressure_relief' "$optimize_path"
+    [ "$status" -eq 1 ]
+    run grep -qFx 'launch_services_rebuild' "$optimize_path"
     [ "$status" -eq 1 ]
 }
 

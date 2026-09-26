@@ -15,6 +15,8 @@ Check more than the obvious command:
 - Time producer and consumer separately before raising a timeout. A 2.3-second `lsregister` dump followed by one command substitution per input line still becomes minutes.
 - Bound installed-binary `--version` and `--help` verification. Broken executables are the ones most likely to hang.
 - Keep install and update single-flight per target directory so one process cannot verify another generation.
+- The self-update bootstrap on a user's machine (temp file, registry, exec) is frozen at whatever version installed it, so a broken installed version cannot repair itself. That is why `_update_self_heal_reinstall` streams `install.sh` from `main` into bash with no local temp files (#1297). V1.47.1 shipped the false-success shape the bounded version check now prevents: update success read from installer output instead of from the installed binary.
+- The single-flight mutex prefers absolute `/usr/bin/lockf` because the kernel drops that lock even if the holder is killed. `lockf` only ships with newer macOS, and requiring it made install and update exit before writing a file on every older release (#1348); the `mkdir` fallback exists for those releases. The lock wrapper is not a shell array because the empty array is the fallback path, and an empty array under `set -u` is an unbound-variable error on Bash 3.2 (section 5).
 
 ```bash
 for command_name in 'du -s' mdfind xcrun system_profiler ioreg brew; do
@@ -53,7 +55,8 @@ macOS command output is localized, drifts between releases, and can print errors
 - Reject PlistBuddy's missing-file prose as data.
 - Use stock macOS semantics when checking flags. BSD `grep -Z` means `--decompress`; a developer alias may hide that.
 - Prefer exit codes, plist keys, and machine-readable output over prose matching.
-- Join records on the machine identifier, never on a heading or display string. `simctl runtime list` titles each image with the image version (`iOS 26.4.1`) while `simctl list devices` groups under the runtime short name (`iOS 26.4`). A name join calls every point release an orphan and offers `simctl runtime delete` for a runtime its simulators still bind (`#1505`). `mdls -name kMDItemDisplayName` returns the on-disk file name, not Finder's localized name, so it always beat `CFBundleDisplayName` and shipped folder names like `VideoFusion-macOS` (`#1520`).
+- Join records on the machine identifier, never on a heading or display string. `simctl runtime list` titles each image with the image version (`iOS 26.4.1`) while `simctl list devices` groups under the runtime short name (`iOS 26.4`). A name join calls every point release an orphan and offers `simctl runtime delete` for a runtime its simulators still bind (`#1505`). `mdls -name kMDItemDisplayName` returns the on-disk file name, not Finder's localized name, so it always differed from `app_name` and always won the old selection, leaving the `CFBundleDisplayName` and `CFBundleName` branches unreachable and shipping folder names like `VideoFusion-macOS` (`#1520`).
+- `plutil -p` is documented by `man plutil` as unstable and not designed for machine parsing. macOS 15 prints a JSON boolean true as `1` while macOS 26 and 27 print `true`, so a filter pinned to one spelling silently cleaned nothing on the other: `#1512` was fixed and then regressed for eight days with CI green. Where a boolean prints as `1` nothing can tell it from the integer 1. The rendering is also depth-blind, so `{"outer":{"inner":true}}` offered a directory named `inner` for deletion, a wrong deletion rather than a missed one. That is why `tests/clean_app_caches.bats` runs on the macos-14/15 compatibility job.
 
 Use `command grep` when flag behavior matters, because the interactive environment may alias it.
 
@@ -87,6 +90,8 @@ Once the caller establishes cancellation, carry that decision through every boun
 The regression shape matters. Make the first candidate's safety guard return 124 or 130 and make the second candidate succeed if reached. Assert the exact top-level status plus the absence of a positive trace from the second probe, preview registration, sink, and later section. If both candidates independently time out, the test cannot prove cancellation was sticky. Separately preserve the removal-timeout and cooperative-section-budget continuation cases in `tests/clean_core.bats`.
 
 Do not hide a cancelled safety probe behind `|| true`, a warning plus `return 0`, or a worker-local exported variable. Those shapes turn a global stop into a local skip.
+
+Name the question instead of spelling the numbers: `mole_rc_timeout` and `mole_rc_timeout_or_signal` in `lib/core/timeout.sh` are the only places that compare a status against 124, and `scripts/audit_timeout_status.py` rejects a raw comparison anywhere else in `check.sh`. A per-item size whose number only feeds totals goes through `mole_item_size_continues` in `lib/core/file_ops.sh`: a timeout or failure keeps the item with an unknown size and marks the freed total partial, a signal records the cancellation and stops. Choosing between those helpers is still the caller's contract decision from the table above; the helper only makes the choice visible in review.
 
 ## Focused pitfalls
 

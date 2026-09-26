@@ -245,8 +245,7 @@ append_dry_run_cleanup_target() {
 record_dry_run_cleanup_target() {
     local path="$1"
     local pending_clean_cancel="${MOLE_CLEAN_CANCEL_STATUS:-0}"
-    if [[ "${MOLE_CURRENT_COMMAND:-}" == "clean" &&
-        ("$pending_clean_cancel" -eq 124 || "$pending_clean_cancel" -ge 128) ]]; then
+    if [[ "${MOLE_CURRENT_COMMAND:-}" == "clean" ]] && mole_rc_timeout_or_signal "$pending_clean_cancel"; then
         return "$pending_clean_cancel"
     fi
     if [[ "${_MOLE_DRY_RUN_TARGET_PREVALIDATED:-false}" != "true" ]]; then
@@ -266,7 +265,7 @@ record_dry_run_cleanup_target() {
             if [[ $live_cache_state -eq 0 || $live_cache_state -eq 2 ]]; then
                 return 1
             fi
-            if [[ $live_cache_state -eq 124 || $live_cache_state -ge 128 ]]; then
+            if mole_rc_timeout_or_signal "$live_cache_state"; then
                 _mole_record_clean_cancellation "$live_cache_state"
                 return "$live_cache_state"
             fi
@@ -279,7 +278,7 @@ record_dry_run_cleanup_target() {
             if [[ $sqlite_state -eq 0 || $sqlite_state -eq 2 ]]; then
                 return 1
             fi
-            if [[ $sqlite_state -eq 124 || $sqlite_state -ge 128 ]]; then
+            if mole_rc_timeout_or_signal "$sqlite_state"; then
                 _mole_record_clean_cancellation "$sqlite_state"
                 return "$sqlite_state"
             fi
@@ -292,9 +291,20 @@ record_dry_run_cleanup_target() {
     append_dry_run_cleanup_target "$@"
 }
 
-# Emit the first complete ledger record for each path identity. Perl keeps the
-# normal path linear for large clean previews; the Bash fallback preserves the
-# same NUL-safe format on systems without Perl.
+# Emit the first complete ledger record for each path identity, with a seventh
+# field naming the nearest measured ancestor that is also a candidate, or empty.
+# Sections overlap on purpose: "User essentials" sweeps ~/Library/Caches/* whole,
+# then later sections list ~/Library/Caches/Yarn/v6 or Homebrew/downloads/*
+# again. The preview measured both, so Potential space counted those bytes
+# twice; a real run only ever frees them once, whichever order the sections
+# reach them in. The row stays in the preview, because a whitelist entry for
+# the child is how a user protects it, but the renderer counts it under the
+# ancestor. An ancestor with unknown size covers nothing: its children's
+# measured bytes are the only figure the "At least" total has for that tree.
+# Identity duplicates are dropped before coverage is decided, so a stale
+# unknown-size duplicate of an ancestor cannot hide a measured child.
+# Perl keeps the normal path linear for large clean previews; the Bash
+# fallback preserves the same NUL-safe format on systems without Perl.
 emit_deduplicated_dry_run_ledger() {
     if [[ -z "${CLEAN_PREVIEW_LEDGER_FILE:-}" || ! -f "$CLEAN_PREVIEW_LEDGER_FILE" ]]; then
         return 0
@@ -310,38 +320,127 @@ emit_deduplicated_dry_run_ledger() {
             binmode STDIN;
             binmode STDOUT;
             local $/ = "\0";
+            my @records;
             my %seen;
-            while (defined(my $identity = <STDIN>)) {
+            my %measured;
+            RECORD: while (defined(my $identity = <STDIN>)) {
                 chomp $identity;
                 my @record = ($identity);
                 for (1 .. 5) {
                     my $field = <STDIN>;
-                    exit 0 unless defined $field;
+                    last RECORD unless defined $field;
                     chomp $field;
                     push @record, $field;
                 }
                 next if $seen{$identity}++;
-                print join("\0", @record), "\0";
+                push @records, \@record;
+                my $path = $record[5];
+                $path =~ s{/+\z}{} if length($path) > 1;
+                $measured{$path} = 1 if $record[3] eq "true";
+            }
+            for my $record (@records) {
+                my $ancestor = $record->[5];
+                $ancestor =~ s{/+\z}{} if length($ancestor) > 1;
+                my $covered_by = "";
+                while ($ancestor =~ s{/[^/]*\z}{} && length $ancestor) {
+                    if ($measured{$ancestor}) {
+                        $covered_by = $ancestor;
+                        last;
+                    }
+                }
+                print join("\0", @$record, $covered_by), "\0";
             }
         ' < "$CLEAN_PREVIEW_LEDGER_FILE"
         return 0
     fi
 
     local identity size_kb count size_known section path
+    local -a record_identities=()
+    local -a record_sizes=()
+    local -a record_counts=()
+    local -a record_size_knowns=()
+    local -a record_sections=()
+    local -a record_paths=()
     local -a seen_identities=()
+    local -a measured_paths=()
+    # One joined string lets each identity or ancestor lookup be a single
+    # pattern match instead of a scan over every entry seen so far. A
+    # separator byte inside an entry would make that match ambiguous, so the
+    # exact list scan is used instead in that case.
+    local measured_separator=$'\x1f'
+    local seen_joined=""
+    local seen_joined_usable=true
+    local measured_joined=""
+    local measured_joined_usable=true
+    local trimmed_path=""
     while IFS= read -r -d '' identity &&
         IFS= read -r -d '' size_kb &&
         IFS= read -r -d '' count &&
         IFS= read -r -d '' size_known &&
         IFS= read -r -d '' section &&
         IFS= read -r -d '' path; do
-        if [[ ${#seen_identities[@]} -gt 0 ]] && mole_identity_in_list "$identity" "${seen_identities[@]}"; then
+        # The needle must be separator-free too: a value that happens to
+        # contain the separator could match across two stored entries.
+        if [[ "$seen_joined_usable" == "true" && "$identity" != *"$measured_separator"* ]]; then
+            if [[ "$seen_joined" == *"$measured_separator$identity$measured_separator"* ]]; then
+                continue
+            fi
+        elif [[ ${#seen_identities[@]} -gt 0 ]] && mole_identity_in_list "$identity" "${seen_identities[@]}"; then
             continue
         fi
         seen_identities+=("$identity")
-        printf '%s\0%s\0%s\0%s\0%s\0%s\0' \
-            "$identity" "$size_kb" "$count" "$size_known" "$section" "$path"
+        [[ "$identity" == *"$measured_separator"* ]] && seen_joined_usable=false
+        seen_joined+="$measured_separator$identity$measured_separator"
+        record_identities+=("$identity")
+        record_sizes+=("$size_kb")
+        record_counts+=("$count")
+        record_size_knowns+=("$size_known")
+        record_sections+=("$section")
+        record_paths+=("$path")
+        if [[ "$size_known" == "true" ]]; then
+            # Trim in place: a command substitution would drop a trailing
+            # newline from the path and desynchronize the two engines.
+            trimmed_path="$path"
+            while [[ ${#trimmed_path} -gt 1 && "$trimmed_path" == */ ]]; do
+                trimmed_path="${trimmed_path%/}"
+            done
+            measured_paths+=("$trimmed_path")
+            [[ "$trimmed_path" == *"$measured_separator"* ]] && measured_joined_usable=false
+            measured_joined+="$measured_separator$trimmed_path$measured_separator"
+        fi
     done < "$CLEAN_PREVIEW_LEDGER_FILE"
+
+    local record_index=0
+    local ancestor=""
+    local covered_by=""
+    while [[ $record_index -lt ${#record_identities[@]} ]]; do
+        path="${record_paths[$record_index]}"
+        ancestor="$path"
+        while [[ ${#ancestor} -gt 1 && "$ancestor" == */ ]]; do
+            ancestor="${ancestor%/}"
+        done
+        covered_by=""
+        if [[ ${#measured_paths[@]} -gt 0 ]]; then
+            while [[ "$ancestor" == */* ]]; do
+                ancestor="${ancestor%/*}"
+                [[ -n "$ancestor" ]] || break
+                if [[ "$measured_joined_usable" == "true" && "$ancestor" != *"$measured_separator"* ]]; then
+                    if [[ "$measured_joined" == *"$measured_separator$ancestor$measured_separator"* ]]; then
+                        covered_by="$ancestor"
+                        break
+                    fi
+                elif mole_identity_in_list "$ancestor" "${measured_paths[@]}"; then
+                    covered_by="$ancestor"
+                    break
+                fi
+            done
+        fi
+        printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
+            "${record_identities[$record_index]}" "${record_sizes[$record_index]}" \
+            "${record_counts[$record_index]}" "${record_size_knowns[$record_index]}" \
+            "${record_sections[$record_index]}" "$path" "$covered_by"
+        record_index=$((record_index + 1))
+    done
 }
 
 write_clean_preview_header() {
@@ -362,7 +461,7 @@ EOF
 render_clean_preview_from_ledger() {
     write_clean_preview_header
 
-    local identity size_kb count size_known section path
+    local identity size_kb count size_known section path covered_by
     local current_rendered_section=""
     local known_size_kb=0
     local rendered_items=0
@@ -376,7 +475,8 @@ render_clean_preview_from_ledger() {
             IFS= read -r -d '' count &&
             IFS= read -r -d '' size_known &&
             IFS= read -r -d '' section &&
-            IFS= read -r -d '' path; do
+            IFS= read -r -d '' path &&
+            IFS= read -r -d '' covered_by; do
             if [[ "$section" != "$current_rendered_section" ]]; then
                 echo "" >> "$EXPORT_LIST_FILE"
                 echo "=== $section ===" >> "$EXPORT_LIST_FILE"
@@ -391,12 +491,19 @@ render_clean_preview_from_ledger() {
             [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]] || count=1
             local item_note=""
             [[ "$count" -gt 1 ]] && item_note=", $count items"
+            # A row inside another measured candidate stays visible, so the
+            # user can still copy it into the whitelist, but its bytes and
+            # items are already in the ancestor's row.
+            if [[ -n "$covered_by" ]]; then
+                item_note+=", counted under $covered_by"
+            fi
             if [[ "$size_known" == "true" ]]; then
                 echo "$path  # $(bytes_to_human "$((size_kb * 1024))")$item_note" >> "$EXPORT_LIST_FILE"
             else
                 echo "$path  # size unknown$item_note" >> "$EXPORT_LIST_FILE"
-                unknown_size_count=$((unknown_size_count + 1))
+                [[ -n "$covered_by" ]] || unknown_size_count=$((unknown_size_count + 1))
             fi
+            [[ -z "$covered_by" ]] || continue
 
             known_size_kb=$((known_size_kb + size_kb))
             rendered_items=$((rendered_items + count))
@@ -815,8 +922,7 @@ _safe_clean_impl() {
     shift
 
     local pending_clean_cancel="${MOLE_CLEAN_CANCEL_STATUS:-0}"
-    if [[ "${MOLE_CURRENT_COMMAND:-}" == "clean" &&
-        ("$pending_clean_cancel" -eq 124 || "$pending_clean_cancel" -ge 128) ]]; then
+    if [[ "${MOLE_CURRENT_COMMAND:-}" == "clean" ]] && mole_rc_timeout_or_signal "$pending_clean_cancel"; then
         return "$pending_clean_cancel"
     fi
 
@@ -1017,7 +1123,7 @@ _safe_clean_impl() {
                 > "$bulk_stat_file" 2> /dev/null || bulk_stat_rc=$?
             if [[ $bulk_stat_rc -ge 128 ]]; then
                 cleanup_interrupt_rc=$bulk_stat_rc
-            elif [[ $bulk_stat_rc -eq 124 ]]; then
+            elif mole_rc_timeout "$bulk_stat_rc"; then
                 # The size is only used for the freed total; a stalled stat
                 # must not cancel the delete set. Sizes are already 0 here.
                 MOLE_CLEAN_SIZING_TIMEOUTS=$((${MOLE_CLEAN_SIZING_TIMEOUTS:-0} + 1))
@@ -1045,7 +1151,7 @@ _safe_clean_impl() {
                     if [[ $_dsize_rc -ge 128 ]]; then
                         cleanup_interrupt_rc=$_dsize_rc
                         break
-                    elif [[ $_dsize_rc -eq 124 ]]; then
+                    elif mole_rc_timeout "$_dsize_rc"; then
                         MOLE_CLEAN_SIZING_TIMEOUTS=$((${MOLE_CLEAN_SIZING_TIMEOUTS:-0} + 1))
                     fi
                     [[ "$_dsize" =~ ^[0-9]+$ ]] || _dsize=0
@@ -1073,7 +1179,7 @@ _safe_clean_impl() {
                         if [[ $size_rc -ge 128 ]]; then
                             exit "$size_rc"
                         fi
-                        if [[ $size_rc -eq 124 ]]; then
+                        if mole_rc_timeout "$size_rc"; then
                             # Sizing budget exhausted: keep the item in the
                             # delete set and report its size as 0.
                             size_unknown=1
@@ -1174,7 +1280,7 @@ _safe_clean_impl() {
                             _MOLE_SAFE_CLEAN_EXPECTED_PARENT_ID=""
                             _MOLE_SAFE_CLEAN_EXPECTED_TARGET_ID=""
                             "$delete_guard" "$path" || action_rc=$?
-                            if [[ $action_rc -eq 124 || $action_rc -ge 128 ]]; then
+                            if mole_rc_timeout_or_signal "$action_rc"; then
                                 cleanup_interrupt_rc=$action_rc
                                 break
                             elif [[ $action_rc -ne 0 ]]; then
@@ -1210,7 +1316,7 @@ _safe_clean_impl() {
                             _MOLE_SAFE_CLEAN_EXPECTED_PARENT_ID=""
                             _MOLE_SAFE_CLEAN_EXPECTED_TARGET_ID=""
                             "$delete_guard" "$path" || action_rc=$?
-                            if [[ $action_rc -eq 124 || $action_rc -ge 128 ]]; then
+                            if mole_rc_timeout_or_signal "$action_rc"; then
                                 cleanup_interrupt_rc=$action_rc
                                 break
                             elif [[ $action_rc -ne 0 ]]; then
@@ -1221,7 +1327,7 @@ _safe_clean_impl() {
                         action_rc=0
                         record_dry_run_cleanup_target \
                             "$path" "$size" 1 true || action_rc=$?
-                        if [[ $action_rc -eq 124 || $action_rc -ge 128 ]]; then
+                        if mole_rc_timeout_or_signal "$action_rc"; then
                             cleanup_interrupt_rc=$action_rc
                             break
                         elif [[ $action_rc -eq 0 ]]; then
@@ -1270,7 +1376,7 @@ _safe_clean_impl() {
                 if [[ $size_rc -ge 128 ]]; then
                     cleanup_interrupt_rc=$size_rc
                     break
-                elif [[ $size_rc -eq 124 ]]; then
+                elif mole_rc_timeout "$size_rc"; then
                     # Sizing budget exhausted: keep cleaning with size 0.
                     MOLE_CLEAN_SIZING_TIMEOUTS=$((${MOLE_CLEAN_SIZING_TIMEOUTS:-0} + 1))
                 fi
@@ -1285,7 +1391,7 @@ _safe_clean_impl() {
                         _MOLE_SAFE_CLEAN_EXPECTED_PARENT_ID=""
                         _MOLE_SAFE_CLEAN_EXPECTED_TARGET_ID=""
                         "$delete_guard" "$path" || action_rc=$?
-                        if [[ $action_rc -eq 124 || $action_rc -ge 128 ]]; then
+                        if mole_rc_timeout_or_signal "$action_rc"; then
                             cleanup_interrupt_rc=$action_rc
                             break
                         elif [[ $action_rc -ne 0 ]]; then
@@ -1320,7 +1426,7 @@ _safe_clean_impl() {
                         _MOLE_SAFE_CLEAN_EXPECTED_PARENT_ID=""
                         _MOLE_SAFE_CLEAN_EXPECTED_TARGET_ID=""
                         "$delete_guard" "$path" || action_rc=$?
-                        if [[ $action_rc -eq 124 || $action_rc -ge 128 ]]; then
+                        if mole_rc_timeout_or_signal "$action_rc"; then
                             cleanup_interrupt_rc=$action_rc
                             break
                         elif [[ $action_rc -ne 0 ]]; then
@@ -1331,7 +1437,7 @@ _safe_clean_impl() {
                     action_rc=0
                     record_dry_run_cleanup_target \
                         "$path" "$size_kb" 1 true || action_rc=$?
-                    if [[ $action_rc -eq 124 || $action_rc -ge 128 ]]; then
+                    if mole_rc_timeout_or_signal "$action_rc"; then
                         cleanup_interrupt_rc=$action_rc
                         break
                     elif [[ $action_rc -eq 0 ]]; then
@@ -1402,9 +1508,7 @@ _safe_clean_impl() {
             line_color=$(cleanup_result_color_kb "$total_size_kb")
             echo -e "  ${line_color}${ICON_SUCCESS}${NC} $description${NC} · ${count_note}${line_color}$size_human${NC}"
         fi
-        files_cleaned=$((files_cleaned + total_count))
-        total_size_cleaned=$((total_size_cleaned + total_size_kb))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$total_count" "$total_size_kb"
         note_activity
     fi
 
@@ -1655,7 +1759,7 @@ perform_cleanup() {
             shift
         fi
         local pending_clean_cancel="${MOLE_CLEAN_CANCEL_STATUS:-0}"
-        if [[ $pending_clean_cancel -eq 124 || $pending_clean_cancel -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$pending_clean_cancel"; then
             return "$pending_clean_cancel"
         fi
         local step_name="${1:-cleanup step}"
@@ -1665,12 +1769,12 @@ perform_cleanup() {
         "$@" || step_rc=$?
         debug_timer_end "cleanup step: $step_name" _perf_step_start
         pending_clean_cancel="${MOLE_CLEAN_CANCEL_STATUS:-0}"
-        if [[ $step_rc -eq 124 || $step_rc -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$step_rc"; then
             MOLE_CLEAN_CANCEL_STATUS=$step_rc
             export MOLE_CLEAN_CANCEL_STATUS
             return "$step_rc"
         fi
-        if [[ $pending_clean_cancel -eq 124 || $pending_clean_cancel -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$pending_clean_cancel"; then
             return "$pending_clean_cancel"
         fi
         if [[ "$required" == "true" && $step_rc -ne 0 ]]; then
@@ -1731,7 +1835,7 @@ perform_cleanup() {
             debug_timer_end "cleanup step: run_cloud_and_office_cleanup" \
                 _perf_cloud_office_start
             if [[ $cloud_office_rc -ne 0 ]]; then
-                if [[ $cloud_office_rc -eq 124 || $cloud_office_rc -ge 128 ]]; then
+                if mole_rc_timeout_or_signal "$cloud_office_rc"; then
                     _mole_record_clean_cancellation "$cloud_office_rc"
                     return "$cloud_office_rc"
                 else
@@ -1813,7 +1917,7 @@ perform_cleanup() {
 
     local summary_heading=""
     local summary_status="success"
-    if [[ $cleanup_cancel_rc -eq 124 ]]; then
+    if mole_rc_timeout "$cleanup_cancel_rc"; then
         if [[ "$DRY_RUN" == "true" ]]; then
             summary_heading="Dry run cancelled"
         else
@@ -1842,7 +1946,7 @@ perform_cleanup() {
 
     local -a summary_details=()
     if [[ $cleanup_cancel_rc -ne 0 ]]; then
-        if [[ $cleanup_cancel_rc -eq 124 ]]; then
+        if mole_rc_timeout "$cleanup_cancel_rc"; then
             summary_details+=("${GRAY}${ICON_WARNING}${NC} Cancelled: a scan or size check timed out (exit 124). Remaining cleanup was skipped.")
         elif [[ $cleanup_cancel_rc -ge 128 ]]; then
             summary_details+=("${GRAY}${ICON_WARNING}${NC} Cancelled: a cleanup step was interrupted (exit $cleanup_cancel_rc). Remaining cleanup was skipped.")
@@ -2016,10 +2120,9 @@ run_cloud_and_office_cleanup() {
 
     clean_cloud_storage || cleanup_rc=$?
     pending_clean_cancel="${MOLE_CLEAN_CANCEL_STATUS:-0}"
-    if [[ $cleanup_rc -eq 124 || $cleanup_rc -ge 128 ||
-        $pending_clean_cancel -eq 124 || $pending_clean_cancel -ge 128 ]]; then
+    if mole_rc_timeout_or_signal "$cleanup_rc" || mole_rc_timeout_or_signal "$pending_clean_cancel"; then
         _MOLE_CLEAN_SECTION_DEADLINE=""
-        if [[ $cleanup_rc -eq 124 || $cleanup_rc -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$cleanup_rc"; then
             return "$cleanup_rc"
         fi
         return "$pending_clean_cancel"
@@ -2029,10 +2132,9 @@ run_cloud_and_office_cleanup() {
         cleanup_rc=0
         clean_office_applications || cleanup_rc=$?
         pending_clean_cancel="${MOLE_CLEAN_CANCEL_STATUS:-0}"
-        if [[ $cleanup_rc -eq 124 || $cleanup_rc -ge 128 ||
-            $pending_clean_cancel -eq 124 || $pending_clean_cancel -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$cleanup_rc" || mole_rc_timeout_or_signal "$pending_clean_cancel"; then
             _MOLE_CLEAN_SECTION_DEADLINE=""
-            if [[ $cleanup_rc -eq 124 || $cleanup_rc -ge 128 ]]; then
+            if mole_rc_timeout_or_signal "$cleanup_rc"; then
                 return "$cleanup_rc"
             fi
             return "$pending_clean_cancel"

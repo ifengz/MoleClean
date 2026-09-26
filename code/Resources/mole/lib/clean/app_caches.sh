@@ -155,14 +155,18 @@ clean_xcode_derived_data() {
                 dry_run_stopped_reason=$(_xcode_cleanup_skip_reason "$xcode_state")
                 break
             fi
-            local size_rc=0
+            local size_rc=0 stop_rc=0
             dir_size_kb=$(get_path_size_kb "$dir" 2> /dev/null) || size_rc=$?
-            if [[ $size_rc -ne 0 ]]; then
+            mole_item_size_continues "$size_rc" || stop_rc=$?
+            if [[ $stop_rc -ne 0 ]]; then
                 stop_section_spinner
-                _mole_record_clean_cancellation "$size_rc"
-                return "$size_rc"
+                return "$stop_rc"
             fi
-            [[ "$dir_size_kb" =~ ^[0-9]+$ ]] || dir_size_kb=0
+            local size_known=true
+            [[ $size_rc -eq 0 && "$dir_size_kb" =~ ^[0-9]+$ ]] || {
+                dir_size_kb=0
+                size_known=false
+            }
             xcode_state=0
             _xcode_cleanup_process_state || xcode_state=$?
             if [[ $xcode_state -ne 1 ]]; then
@@ -170,7 +174,7 @@ clean_xcode_derived_data() {
                 break
             fi
             if declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
-                record_dry_run_cleanup_target "$dir" "$dir_size_kb" 1 true || continue
+                record_dry_run_cleanup_target "$dir" "$dir_size_kb" 1 "$size_known" || continue
             fi
             size_kb=$((size_kb + dir_size_kb))
             dry_run_count=$((dry_run_count + 1))
@@ -215,14 +219,14 @@ clean_xcode_derived_data() {
         fi
 
         local dir_size_kb=0
-        local size_rc=0
+        local size_rc=0 stop_rc=0
         dir_size_kb=$(get_path_size_kb "$dir" 2> /dev/null) || size_rc=$?
-        if [[ $size_rc -ne 0 ]]; then
+        mole_item_size_continues "$size_rc" || stop_rc=$?
+        if [[ $stop_rc -ne 0 ]]; then
             stop_section_spinner
-            _mole_record_clean_cancellation "$size_rc"
-            return "$size_rc"
+            return "$stop_rc"
         fi
-        [[ "$dir_size_kb" =~ ^[0-9]+$ ]] || dir_size_kb=0
+        [[ $size_rc -eq 0 && "$dir_size_kb" =~ ^[0-9]+$ ]] || dir_size_kb=0
 
         # Sizing is timeout-bounded but can still take long enough for a build
         # to start. Recheck at the deletion boundary, not only before du.
@@ -247,9 +251,7 @@ clean_xcode_derived_data() {
         local line_color
         line_color=$(cleanup_result_color_kb "$removed_size_kb" 2> /dev/null || echo "$GREEN")
         echo -e "  ${line_color}${ICON_SUCCESS}${NC} Xcode DerivedData · ${removed} ${project_label}, ${line_color}${size_human}${NC}"
-        files_cleaned=$((${files_cleaned:-0} + removed))
-        total_size_cleaned=$((${total_size_cleaned:-0} + removed_size_kb))
-        total_items=$((${total_items:-0} + 1))
+        mole_add_cleaned_row "$removed" "$removed_size_kb"
         note_activity
     fi
     if [[ -n "$stopped_reason" ]]; then
@@ -359,6 +361,54 @@ clean_xcode_tools() {
         fi
     fi
 }
+# The directory names an editor's `.obsolete` journal marks stale, one per line.
+#
+# Reads the XML plutil emits rather than the `plutil -p` rendering an earlier
+# fix parsed. `man plutil` says of `-p`: "The output format is not stable and
+# not designed for machine parsing", and it is not. macOS 15 prints a JSON
+# boolean true as `1` while macOS 26 and 27 print `true`, so a filter pinned to
+# one spelling silently cleans nothing on the other (tw93/Mole#1512), and where
+# a boolean prints as `1` no filter can tell it from the integer 1 at all.
+#
+# That rendering is also depth-blind, which is the worse half: its keys carry
+# no nesting, so `{"outer":{"inner":true}}` handed back `inner` as a top-level
+# extension directory. That is a wrong deletion, not a missed one.
+#
+# In the XML, depth is explicit and each type is its own tag, so a key counts
+# only when it sits in the root dict and its value is exactly `<true/>`. Empty
+# containers are self-closing (`<dict/>`, `<array/>`) and must not move the
+# depth, so every tag is compared for equality rather than by prefix.
+_mole_obsolete_extension_keys() {
+    local obsolete_file="$1"
+    plutil -convert xml1 -o - "$obsolete_file" 2> /dev/null | awk '
+        # &amp; is decoded LAST: a key holding the literal text "&lt;" arrives
+        # as "&amp;lt;", and decoding &amp; first would turn it into a real "<".
+        function decode(s) {
+            gsub(/&lt;/, "<", s)
+            gsub(/&gt;/, ">", s)
+            gsub(/&amp;/, "\\&", s)
+            return s
+        }
+        {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line == "<dict>" || line == "<array>") { depth++; pending = ""; next }
+            if (line == "</dict>" || line == "</array>") { depth--; pending = ""; next }
+            if (depth == 1 && line ~ /^<key>.*<\/key>$/) {
+                pending = substr(line, 6, length(line) - 11)
+                next
+            }
+            if (depth == 1 && pending != "") {
+                if (line == "<true/>") print decode(pending)
+                pending = ""
+                next
+            }
+            pending = ""
+        }
+    '
+}
+
 # Remove extension directories that VS Code / Cursor have marked obsolete.
 # Each editor writes a .obsolete JSON file under its extensions root whose keys
 # are stale extension directory names left behind after an extension update.
@@ -384,9 +434,7 @@ clean_editor_obsolete_extensions() {
             target="$ext_root/$key"
             [[ -d "$target" ]] || continue
             safe_clean "$target" "Obsolete $editor_label extension"
-        done < <(plutil -convert xml1 -o - "$obsolete_file" 2> /dev/null |
-            plutil -p - 2> /dev/null |
-            sed -nE 's/^[[:space:]]*"([^"]+)"[[:space:]]*=>[[:space:]]*true[[:space:]]*$/\1/p')
+        done < <(_mole_obsolete_extension_keys "$obsolete_file")
     done
 }
 # Code editors.
@@ -844,7 +892,6 @@ clean_ai_apps() {
     # installs to ~/.lmstudio in 0.3.6, but existing data is not migrated, so
     # never recursively clean the legacy root. The Library/Caches target above
     # is the only path treated as an auto-rebuildable cache here.
-    safe_clean ~/Library/Caches/CCTClearcutLogger "Google Clearcut logs"
     if [[ -d "$HOME/Library/Application Support/Codex" || -d "$HOME/Library/Logs/com.openai.codex" ]]; then
         debug_log "Codex Desktop state left intact by default"
     fi
@@ -1165,7 +1212,7 @@ _autodesk_fusion_version_dir_version() {
     local bundle_id=""
     bundle_id=$(run_with_timeout "$probe_timeout" /usr/bin/plutil \
         -extract CFBundleIdentifier raw "$info_plist" < /dev/null 2> /dev/null) || probe_rc=$?
-    [[ $probe_rc -eq 124 || $probe_rc -ge 128 ]] && return "$probe_rc"
+    mole_rc_timeout_or_signal "$probe_rc" && return "$probe_rc"
     [[ $probe_rc -eq 0 && "$bundle_id" == "com.autodesk.fusion360" ]] || return 1
 
     probe_timeout=$(_mole_timeout_with_deadline \
@@ -1174,7 +1221,7 @@ _autodesk_fusion_version_dir_version() {
     local version=""
     version=$(run_with_timeout "$probe_timeout" /usr/bin/plutil \
         -extract CFBundleVersion raw "$info_plist" < /dev/null 2> /dev/null) || probe_rc=$?
-    [[ $probe_rc -eq 124 || $probe_rc -ge 128 ]] && return "$probe_rc"
+    mole_rc_timeout_or_signal "$probe_rc" && return "$probe_rc"
     [[ $probe_rc -eq 0 && "$version" =~ ^[0-9]+([.][0-9]+)*$ ]] || return 1
 
     probe_timeout=$(_mole_timeout_with_deadline \
@@ -1183,7 +1230,7 @@ _autodesk_fusion_version_dir_version() {
     local executable=""
     executable=$(run_with_timeout "$probe_timeout" /usr/bin/plutil \
         -extract CFBundleExecutable raw "$info_plist" < /dev/null 2> /dev/null) || probe_rc=$?
-    [[ $probe_rc -eq 124 || $probe_rc -ge 128 ]] && return "$probe_rc"
+    mole_rc_timeout_or_signal "$probe_rc" && return "$probe_rc"
     [[ $probe_rc -eq 0 &&
         ("$executable" == "Autodesk Fusion" || "$executable" == "Autodesk Fusion 360") ]] || return 1
     local executable_path="$macos_dir/$executable"
@@ -1366,7 +1413,7 @@ _autodesk_fusion_plan_old_versions() {
         version_rc=0
         _autodesk_fusion_version_dir_version \
             "$dir" "$deadline_seconds" || version_rc=$?
-        if [[ $version_rc -eq 124 || $version_rc -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$version_rc"; then
             inventory_rc=$version_rc
             break
         elif [[ $version_rc -ne 0 ]]; then
@@ -1408,7 +1455,7 @@ _autodesk_fusion_guard_current_is_unchanged() {
         "$_MOLE_AUTODESK_FUSION_GUARD_DEADLINE" || resolve_rc=$?
     if [[ $resolve_rc -ne 0 ]]; then
         _MOLE_AUTODESK_FUSION_GUARD_REASON="current version unknown"
-        [[ $resolve_rc -eq 124 || $resolve_rc -ge 128 ]] && return "$resolve_rc"
+        mole_rc_timeout_or_signal "$resolve_rc" && return "$resolve_rc"
         return 1
     fi
     if [[ "$_MOLE_AUTODESK_FUSION_RESOLVED_DIR" != "$_MOLE_AUTODESK_FUSION_GUARD_CURRENT_DIR" ||
@@ -1452,7 +1499,7 @@ _autodesk_fusion_delete_guard_allows() {
         "$target" "$_MOLE_AUTODESK_FUSION_GUARD_DEADLINE" || version_rc=$?
     if [[ $version_rc -ne 0 ]]; then
         _MOLE_AUTODESK_FUSION_GUARD_REASON="candidate identity changed"
-        [[ $version_rc -eq 124 || $version_rc -ge 128 ]] && return "$version_rc"
+        mole_rc_timeout_or_signal "$version_rc" && return "$version_rc"
         return 1
     fi
     if ! _autodesk_fusion_version_is_older \
@@ -1514,7 +1561,7 @@ clean_autodesk_fusion_old_bundles() {
     local current_rc=0
     _autodesk_fusion_resolve_current_version \
         "$production_root" "$cleanup_deadline" || current_rc=$?
-    if [[ $current_rc -eq 124 ]]; then
+    if mole_rc_timeout "$current_rc"; then
         echo -e "  ${GRAY}${ICON_WARNING}${NC} Autodesk Fusion old versions · skipped (current version probe timed out)"
         note_activity
         return 0
@@ -1532,7 +1579,7 @@ clean_autodesk_fusion_old_bundles() {
     _autodesk_fusion_plan_old_versions \
         "$production_root" "$current_dir" "$current_version" \
         "$cleanup_deadline" || plan_rc=$?
-    if [[ $plan_rc -eq 124 ]]; then
+    if mole_rc_timeout "$plan_rc"; then
         echo -e "  ${GRAY}${ICON_WARNING}${NC} Autodesk Fusion old versions · skipped (inventory timed out)"
         note_activity
         return 0
@@ -1574,7 +1621,7 @@ clean_autodesk_fusion_old_bundles() {
 
         guard_rc=0
         _autodesk_fusion_delete_guard_allows "$dir" || guard_rc=$?
-        if [[ $guard_rc -eq 124 ]]; then
+        if mole_rc_timeout "$guard_rc"; then
             stopped_reason="verification timed out"
             break
         elif [[ $guard_rc -ge 128 ]]; then
@@ -1591,7 +1638,7 @@ clean_autodesk_fusion_old_bundles() {
         if [[ $size_rc -eq 0 ]]; then
             size_kb=$(get_path_size_kb "$dir" "$size_timeout") || size_rc=$?
         fi
-        if [[ $size_rc -eq 124 ]]; then
+        if mole_rc_timeout "$size_rc"; then
             stopped_reason="size probe timed out"
             break
         elif [[ $size_rc -ge 128 ]]; then
@@ -1607,7 +1654,7 @@ clean_autodesk_fusion_old_bundles() {
             # that a real safe_remove final guard would enforce.
             guard_rc=0
             _autodesk_fusion_delete_guard_allows "$dir" || guard_rc=$?
-            if [[ $guard_rc -eq 124 ]]; then
+            if mole_rc_timeout "$guard_rc"; then
                 stopped_reason="verification timed out"
                 break
             elif [[ $guard_rc -ge 128 ]]; then
@@ -1634,7 +1681,7 @@ clean_autodesk_fusion_old_bundles() {
         if [[ $remove_rc -eq 0 ]]; then
             total_size=$((total_size + size_kb))
             cleaned_count=$((cleaned_count + 1))
-        elif [[ $remove_rc -eq 124 ]]; then
+        elif mole_rc_timeout "$remove_rc"; then
             stopped_reason="removal timed out"
             break
         elif [[ $remove_rc -ge 128 ]]; then
@@ -1669,9 +1716,7 @@ clean_autodesk_fusion_old_bundles() {
             line_color=$(cleanup_result_color_kb "$total_size")
             echo -e "  ${line_color}${ICON_SUCCESS}${NC} Autodesk Fusion old versions${NC} · ${line_color}${cleaned_count} dirs, $size_human${NC}"
         fi
-        files_cleaned=$((${files_cleaned:-0} + cleaned_count))
-        total_size_cleaned=$((${total_size_cleaned:-0} + total_size))
-        total_items=$((${total_items:-0} + 1))
+        mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
     fi
     if [[ $failed_count -gt 0 ]]; then
@@ -1855,9 +1900,8 @@ clean_neatdm_stale_segments() {
         local size_kb=""
         local size_rc=0
         size_kb=$(get_path_size_kb "$seg_dir") || size_rc=$?
-        [[ $size_rc -eq 0 ]] || _mole_record_clean_cancellation "$size_rc"
-        [[ $size_rc -eq 0 ]] || return "$size_rc"
-        [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
+        mole_item_size_continues "$size_rc" || return $?
+        [[ $size_rc -eq 0 && "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
 
         if [[ "$DRY_RUN" != "true" ]]; then
             if safe_remove "$seg_dir" true; then
@@ -1880,9 +1924,7 @@ clean_neatdm_stale_segments() {
             line_color=$(cleanup_result_color_kb "$stale_kb")
             echo -e "  ${line_color}${ICON_SUCCESS}${NC} NeatDM stale downloads · ${stale_count} items, ${line_color}${size_human}${NC}"
         fi
-        files_cleaned=$((files_cleaned + stale_count))
-        total_size_cleaned=$((total_size_cleaned + stale_kb))
-        total_items=$((total_items + 1))
+        mole_add_cleaned_row "$stale_count" "$stale_kb"
         note_activity
     fi
 }

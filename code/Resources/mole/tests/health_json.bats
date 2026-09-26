@@ -1,11 +1,13 @@
 #!/usr/bin/env bats
+
+load helpers/common
+
 # get_memory_info must scale vm_stat page counts by vm_stat's own page size
 # (16384 on Apple Silicon), not a hardcoded 4096, or memory_used_gb in the
 # status JSON reads 4x low on Apple Silicon.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
+    mole_test_setup_project_root
 }
 
 @test "get_memory_info uses vm_stat's declared page size" {

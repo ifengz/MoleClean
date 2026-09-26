@@ -1,10 +1,12 @@
 #!/usr/bin/env bats
+
+load helpers/common
+
 # Memory pressure, idle-VM, and runaway-process diagnosis.
 # All three are read-only and must stay silent on a healthy machine.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
+    mole_test_setup_project_root
 }
 
 # ---------- memory pressure ----------

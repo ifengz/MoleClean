@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-	PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-	export PROJECT_ROOT
+	mole_test_setup_project_root
 
 	ORIGINAL_HOME="${HOME:-}"
 	export ORIGINAL_HOME
@@ -404,7 +405,7 @@ EOF
 	if [[ -f "$PROJECT_ROOT/bin/analyze-go" ]]; then
 		[ -x "$PROJECT_ROOT/bin/analyze-go" ]
 		run file "$PROJECT_ROOT/bin/analyze-go"
-		[[ "$output" == *"Mach-O"* ]] || [[ "$output" == *"executable"* ]]
+		[[ "$output" == *"Mach-O"* ]] || [[ "$output" == *"executable"* ]] || return 1
 	else
 		skip "analyze-go binary not built"
 	fi

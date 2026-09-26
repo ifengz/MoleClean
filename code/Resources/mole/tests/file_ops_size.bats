@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 # Tests for get_path_size_kb in lib/core/file_ops.sh.
 # Exercises the allocated-block stat fast-path for regular files / symlinks
 # and the du fallback for directories, plus error and edge cases. Values are
@@ -7,8 +9,7 @@
 # basis.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
+    mole_test_setup_project_root
 }
 
 setup() {
@@ -234,4 +235,40 @@ EOF
 
     [ "$status" -eq 0 ] || return 1
     [ "$output" = "RC=1 SIZE=" ]
+}
+
+@test "mole_item_size_continues keeps an item through a failed size and stops on a signal" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+MOLE_CURRENT_COMMAND=clean
+for rc in 0 1 124 130; do
+    MOLE_CLEAN_CANCEL_STATUS=0
+    MOLE_CLEAN_SIZING_TIMEOUTS=0
+    result=0
+    mole_item_size_continues "$rc" || result=$?
+    printf '%s:%s:%s:%s ' "$rc" "$result" "$MOLE_CLEAN_SIZING_TIMEOUTS" "$MOLE_CLEAN_CANCEL_STATUS"
+done
+SCRIPT
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == "0:0:0:0 1:0:1:0 124:0:1:0 130:130:0:130 " ]]
+}
+
+@test "mole_add_cleaned_row adds one category and ignores non-numeric input" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+files_cleaned=2
+total_size_cleaned=10
+total_items=1
+removed=3
+mole_add_cleaned_row 4 "$removed"
+mole_add_cleaned_row "removed" "12KB"
+mole_add_cleaned_row "" ""
+printf 'FILES=%s KB=%s ITEMS=%s\n' "$files_cleaned" "$total_size_cleaned" "$total_items"
+SCRIPT
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == "FILES=6 KB=13 ITEMS=4" ]]
 }

@@ -20,6 +20,80 @@ show_brew_autoremove_preview() {
     sed 's/^/    /' "$preview_file"
 }
 
+# `brew cleanup --dry-run` shares the real run's arguments, so the preview
+# lists what that run would remove rather than a generic promise.
+run_brew_cleanup_preview() {
+    local timeout_seconds="$1"
+    local preview_file="$2"
+
+    HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_AUTOREMOVE=1 HOMEBREW_NO_COLOR=1 NONINTERACTIVE=1 \
+        run_with_timeout "$timeout_seconds" brew cleanup --prune=30 --dry-run > "$preview_file" 2>&1
+}
+
+# Print a `brew cleanup --dry-run` result as one total row plus one row per
+# item. An old Cellar version reads as "<formula> <version>"; any other path
+# keeps its location. Empty directories, 0B entries and "Skipping" warnings
+# free nothing and stay out of the list. Returns 1 when the preview names
+# nothing.
+show_brew_cleanup_preview() {
+    local preview_file="$1"
+    [[ -s "$preview_file" ]] || return 1
+
+    local -a rows=()
+    local line rest path detail size label
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == "Would remove: "* ]] || continue
+        rest="${line#Would remove: }"
+        path="$rest"
+        size=""
+        if [[ "$rest" == *" ("*")" ]]; then
+            path="${rest% (*}"
+            detail="${rest##* (}"
+            detail="${detail%)}"
+            size="${detail##*, }"
+        fi
+        [[ "$size" == "0B" ]] && continue
+        if [[ "$path" =~ /Cellar/([^/]+)/([^/]+)$ ]]; then
+            label="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+        else
+            label="${path/#$HOME/~}"
+        fi
+        label=$(mole_terminal_safe_text "$label")
+        [[ -n "$size" ]] && label+=" · $(mole_terminal_safe_text "$size")"
+        rows+=("$label")
+    done < "$preview_file"
+    [[ ${#rows[@]} -gt 0 ]] || return 1
+
+    local freed=""
+    freed=$(sed -n 's/^==> This operation would free approximately \(.*\) of disk space\.$/\1/p' "$preview_file" | tail -1)
+    freed=$(mole_terminal_safe_text "$freed")
+    if [[ -n "$freed" ]]; then
+        echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} Homebrew cleanup · would free ${freed}"
+    else
+        echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} Homebrew cleanup · ${#rows[@]} items"
+    fi
+    printf '    %s\n' "${rows[@]}"
+}
+
+# The window only counts a finished cleanup, which is the only one stamped.
+# Dry-run asks the same question so it never previews a run that would skip.
+brew_cleanup_ran_recently() {
+    local brew_cache_file="$1"
+    local cache_valid_days=7
+    [[ -f "$brew_cache_file" ]] || return 1
+    local last_cleanup
+    last_cleanup=$(cat "$brew_cache_file" 2> /dev/null || echo "0")
+    local current_time
+    current_time=$(get_epoch_seconds)
+    local time_diff=$((current_time - last_cleanup))
+    local days_diff=$((time_diff / 86400))
+    [[ $days_diff -lt $cache_valid_days ]] || return 1
+    local cleaned_when="cleaned ${days_diff}d ago"
+    [[ $days_diff -eq 0 ]] && cleaned_when="cleaned today"
+    debug_log "Homebrew cleanup skipped: ${cleaned_when}"
+    return 0
+}
+
 run_brew_autoremove_preview() {
     local timeout_seconds="$1"
     local preview_file="$2"
@@ -202,21 +276,35 @@ clean_homebrew() {
     command -v brew > /dev/null 2>&1 || return 0
     local cleanup_timeout="${MOLE_TIMEOUT_PKG_CLEANUP_SEC:-20}"
     local autoremove_preview_timeout="${MOLE_TIMEOUT_PKG_LIST_SEC:-10}"
+    local brew_cache_file="${HOME}/.cache/mole/brew_last_cleanup"
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         # Check if Homebrew cache is whitelisted
         if is_path_whitelisted "$HOME/Library/Caches/Homebrew"; then
             echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Homebrew · skipped (whitelist)"
             note_activity
         else
-            echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} Homebrew · would cleanup"
-            note_activity
+            if ! brew_cleanup_ran_recently "$brew_cache_file"; then
+                local dry_run_cleanup_file
+                dry_run_cleanup_file=$(create_temp_file)
+                local dry_run_cleanup_exit=0
+                run_brew_cleanup_preview "$cleanup_timeout" "$dry_run_cleanup_file" || dry_run_cleanup_exit=$?
+                if [[ $dry_run_cleanup_exit -eq 0 ]]; then
+                    show_brew_cleanup_preview "$dry_run_cleanup_file" && note_activity
+                elif mole_rc_timeout "$dry_run_cleanup_exit"; then
+                    echo -e "  ${GRAY}${ICON_WARNING}${NC} Homebrew cleanup preview timed out · run ${GRAY}brew cleanup --dry-run${NC} manually"
+                    note_activity
+                else
+                    echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} Homebrew · would cleanup"
+                    note_activity
+                fi
+            fi
             local dry_run_autoremove_file
             dry_run_autoremove_file=$(create_temp_file)
             local dry_run_autoremove_exit=0
             run_brew_autoremove_preview "$autoremove_preview_timeout" "$dry_run_autoremove_file" || dry_run_autoremove_exit=$?
             if [[ $dry_run_autoremove_exit -eq 0 ]] && brew_autoremove_preview_has_items "$dry_run_autoremove_file"; then
                 show_brew_autoremove_preview "$dry_run_autoremove_file"
-            elif [[ $dry_run_autoremove_exit -eq 124 ]]; then
+            elif mole_rc_timeout "$dry_run_autoremove_exit"; then
                 echo -e "  ${GRAY}${ICON_WARNING}${NC} Autoremove preview timed out · run ${GRAY}brew autoremove --dry-run${NC} manually"
             fi
         fi
@@ -229,56 +317,30 @@ clean_homebrew() {
         return 0
     fi
     # Skip if cleaned recently to avoid repeated heavy operations.
-    local brew_cache_file="${HOME}/.cache/mole/brew_last_cleanup"
-    local cache_valid_days=7
-    local should_skip=false
-    if [[ -f "$brew_cache_file" ]]; then
-        local last_cleanup
-        last_cleanup=$(cat "$brew_cache_file" 2> /dev/null || echo "0")
-        local current_time
-        current_time=$(get_epoch_seconds)
-        local time_diff=$((current_time - last_cleanup))
-        local days_diff=$((time_diff / 86400))
-        if [[ $days_diff -lt $cache_valid_days ]]; then
-            should_skip=true
-            local cleaned_when="cleaned ${days_diff}d ago"
-            [[ $days_diff -eq 0 ]] && cleaned_when="cleaned today"
-            debug_log "Homebrew cleanup skipped: ${cleaned_when}"
-        fi
-    fi
-    [[ "$should_skip" == "true" ]] && return 0
-    # Skip cleanup if cache is small; autoremove is previewed separately.
-    local skip_cleanup=false
-    local brew_cache_size=0
-    if [[ -d ~/Library/Caches/Homebrew ]]; then
-        brew_cache_size=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" du -skP ~/Library/Caches/Homebrew 2> /dev/null | awk '{print $1}')
-        local du_exit=$?
-        if [[ $du_exit -eq 0 && -n "$brew_cache_size" && "$brew_cache_size" -lt 51200 ]]; then
-            skip_cleanup=true
-        fi
-    fi
+    brew_cleanup_ran_recently "$brew_cache_file" && return 0
+    # No size gate on ~/Library/Caches/Homebrew: most of what `brew cleanup`
+    # frees is old formula versions in the Cellar, which that cache does not
+    # hold. A cache someone already emptied (Mole's Mac app clears downloads)
+    # kept this under the old 50MB gate forever while old versions piled up.
+    # The 7-day window above bounds how often this runs.
     local brew_tmp_file
     local brew_exit=0
-    if [[ "$skip_cleanup" == "false" ]]; then
-        brew_tmp_file=$(create_temp_file)
-        snapshot_homebrew_active_links || true
-        if [[ -t 1 ]]; then MOLE_SPINNER_PREFIX="  " start_inline_spinner "Homebrew cleanup..."; fi
-        HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_AUTOREMOVE=1 NONINTERACTIVE=1 \
-            run_with_timeout "$cleanup_timeout" brew cleanup --prune=30 > "$brew_tmp_file" 2>&1 || brew_exit=$?
-        if [[ -t 1 ]]; then stop_inline_spinner; fi
-        restore_homebrew_active_links
-    fi
+    brew_tmp_file=$(create_temp_file)
+    snapshot_homebrew_active_links || true
+    if [[ -t 1 ]]; then MOLE_SPINNER_PREFIX="  " start_inline_spinner "Homebrew cleanup..."; fi
+    HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_AUTOREMOVE=1 NONINTERACTIVE=1 \
+        run_with_timeout "$cleanup_timeout" brew cleanup --prune=30 > "$brew_tmp_file" 2>&1 || brew_exit=$?
+    if [[ -t 1 ]]; then stop_inline_spinner; fi
+    restore_homebrew_active_links
 
     local brew_success=false
-    if [[ "$skip_cleanup" == "false" && $brew_exit -eq 0 ]]; then
+    if [[ $brew_exit -eq 0 ]]; then
         brew_success=true
     fi
 
     # Process cleanup output and extract metrics
     # Summarize cleanup results.
-    if [[ "$skip_cleanup" == "true" ]]; then
-        debug_log "Homebrew cleanup skipped: cache below threshold (${brew_cache_size}KB)"
-    elif [[ "$brew_success" == "true" && -f "$brew_tmp_file" ]]; then
+    if [[ "$brew_success" == "true" && -f "$brew_tmp_file" ]]; then
         local brew_output
         brew_output=$(cat "$brew_tmp_file" 2> /dev/null || echo "")
         local removed_count freed_space
@@ -293,7 +355,7 @@ clean_homebrew() {
                 note_activity
             fi
         fi
-    elif [[ $brew_exit -eq 124 ]]; then
+    elif mole_rc_timeout "$brew_exit"; then
         echo -e "  ${GRAY}${ICON_WARNING}${NC} Homebrew cleanup timed out · run ${GRAY}brew cleanup${NC} manually"
         note_activity
     fi
@@ -301,7 +363,7 @@ clean_homebrew() {
     autoremove_preview_file=$(create_temp_file)
     local autoremove_preview_exit=0
     run_brew_autoremove_preview "$autoremove_preview_timeout" "$autoremove_preview_file" || autoremove_preview_exit=$?
-    if [[ $autoremove_preview_exit -eq 124 ]]; then
+    if mole_rc_timeout "$autoremove_preview_exit"; then
         echo -e "  ${GRAY}${ICON_WARNING}${NC} Autoremove preview timed out · run ${GRAY}brew autoremove --dry-run${NC} manually"
         # Keep the manual-action guidance visible past the idle-section erase.
         note_activity
@@ -313,10 +375,8 @@ clean_homebrew() {
         echo -e "  ${GRAY}${ICON_WARNING}${NC} Homebrew autoremove · skipped (run ${GRAY}brew autoremove${NC} manually)"
         note_activity
     fi
-    # Update cache timestamp on successful completion or when cleanup was intelligently skipped
-    # This prevents repeated cache size checks within the 7-day window
-    # Update cache timestamp when any work succeeded or was intentionally skipped.
-    if [[ "$skip_cleanup" == "true" ]] || [[ "$brew_success" == "true" ]]; then
+    # Stamp only a finished cleanup; a timed-out one resumes on the next run.
+    if [[ "$brew_success" == "true" ]]; then
         ensure_user_file "$brew_cache_file"
         get_epoch_seconds > "$brew_cache_file"
     fi

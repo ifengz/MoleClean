@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup() {
     PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
     export PROJECT_ROOT

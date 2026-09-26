@@ -547,6 +547,12 @@ should_protect_path() {
             */Library/Caches/com.apple.siriactionsd.ShortcutsSandboxCache | */Library/Caches/com.apple.siriactionsd.ShortcutsSandboxCache/*)
             return 0
             ;;
+        # Google ID store and Clearcut queue. Deleting them while Gemini runs
+        # starts an unbounded write loop (#1607).
+        */Library/Caches/GIPPseudonymousID | */Library/Caches/GIPPseudonymousID/* | \
+            */Library/Caches/CCTClearcutLogger | */Library/Caches/CCTClearcutLogger/*)
+            return 0
+            ;;
         # Wallpaper and aerial screen saver assets are user-selected content.
         # Their download-time mtime does not indicate whether they are active,
         # and deleting them forces a large re-download and selection reset.
@@ -736,7 +742,7 @@ _mole_uninstall_materialize_find0() {
         "$@" < /dev/null > "$output_file" 2> /dev/null || scan_rc=$?
     if [[ $scan_rc -ne 0 ]]; then
         : > "$output_file" || true
-        if [[ $scan_rc -eq 124 || $scan_rc -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$scan_rc"; then
             return "$scan_rc"
         fi
         debug_log "Skipping incomplete uninstall discovery root: ${1:-unknown}"
@@ -2052,7 +2058,7 @@ find_app_receipt_files() {
                     -f -s "$bom_file" < /dev/null 2> /dev/null) || bom_rc=$?
             fi
             if [[ $bom_rc -ne 0 ]]; then
-                if [[ $bom_rc -eq 124 || $bom_rc -ge 128 ]]; then
+                if mole_rc_timeout_or_signal "$bom_rc"; then
                     rm -f -- "$receipt_scan_file" 2> /dev/null || true # SAFE: exact tracked temp file created above
                     return "$bom_rc"
                 fi

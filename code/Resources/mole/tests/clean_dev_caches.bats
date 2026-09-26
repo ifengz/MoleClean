@@ -1,25 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-dev-caches.XXXXXX")"
-    export HOME
-
-    mkdir -p "$HOME"
+    mole_test_setup_home dev-caches
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 make_gh_cache_stub() {
@@ -1089,7 +1077,9 @@ EOF
     [[ "$output" != *"swap.img"* ]]
 }
 
-@test "clean_dev_docker stops before BuildX cleanup when OrbStack sizing times out" {
+@test "clean_dev_docker keeps the OrbStack row and BuildX cleanup when sizing times out" {
+    # The OrbStack row is advisory and never deletes, so a size timeout drops
+    # only the size and later cleanup continues. A signal still stops the run.
     local orb_data="$HOME/Library/Group Containers/HUAQ24HBR6.dev.orbstack/data"
     mkdir -p "$orb_data"
     touch "$orb_data/data.img.raw"
@@ -1100,21 +1090,24 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/dev.sh"
-safe_clean() { echo "UNEXPECTED_BUILDX:$2|$1"; }
-get_path_size_kb() { return 124; }
+safe_clean() { echo "BUILDX:$2|$1"; }
 note_activity() { :; }
 debug_log() { :; }
-set +e
-clean_dev_docker
-rc=$?
-set -e
-printf 'RC=%s CANCEL=%s\n' "$rc" "$MOLE_CLEAN_CANCEL_STATUS"
-[[ $rc -eq 124 && $MOLE_CLEAN_CANCEL_STATUS -eq 124 ]]
+get_path_size_kb() { return 124; }
+rc=0
+clean_dev_docker || rc=$?
+printf 'TIMEOUT RC=%s CANCEL=%s\n' "$rc" "$MOLE_CLEAN_CANCEL_STATUS"
+get_path_size_kb() { return 130; }
+rc=0
+clean_dev_docker || rc=$?
+printf 'SIGNAL RC=%s CANCEL=%s\n' "$rc" "$MOLE_CLEAN_CANCEL_STATUS"
 EOF
 
-    [ "$status" -eq 0 ] || return 1
-    [[ "$output" == *"RC=124 CANCEL=124"* ]] || return 1
-    [[ "$output" != *"UNEXPECTED_BUILDX"* ]]
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"OrbStack container data · review with docker system df"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"BUILDX:Docker BuildX cache"*"TIMEOUT RC=0 CANCEL=0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"SIGNAL RC=130 CANCEL=130"* ]] || { echo "$output"; return 1; }
+    [[ "$(printf '%s\n' "$output" | grep -c 'BUILDX:')" -eq 1 ]]
 }
 
 @test "clean_dev_docker no longer depends on whitelist to avoid prune" {
@@ -1192,6 +1185,8 @@ EOF
 }
 
 @test "ChatGPT running keeps Codex runtime and update staging cleanup dormant (#1305)" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local case_home="$HOME/chatgpt-running-case"
     local runtime_root="$case_home/.cache/codex-runtimes"
     local staging_root="$case_home/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
@@ -1244,6 +1239,159 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"Codex runtimes · manual review (1M)"* ]] || return 1
     [[ "$output" != *"SAFE_CLEAN:Codex CLI runtimes|$HOME/.cache/codex-runtimes/codex-primary-runtime"* ]]
+}
+
+@test "clean_codex_runtimes keeps the review row and the run when sizing times out" {
+    # The review row is advisory and never deletes, so a slow size probe drops
+    # only the size. A signal still stops the run.
+    local iso="$HOME/iso-runtime-size-timeout"
+    mkdir -p "$iso/.cache/codex-runtimes/codex-primary-runtime/dependencies/node"
+    touch "$iso/.cache/codex-runtimes/codex-primary-runtime/runtime.json"
+
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+safe_clean() { echo "SAFE_CLEAN:$2|$1"; }
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+note_activity() { :; }
+_mole_record_clean_cancellation() { echo "CANCELLED:$1"; }
+get_path_size_kb() { return 124; }
+rc=0
+clean_codex_runtimes || rc=$?
+echo "TIMEOUT_RC=$rc"
+get_path_size_kb() { return 130; }
+rc=0
+clean_codex_runtimes || rc=$?
+echo "SIGNAL_RC=$rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Codex runtimes · manual review"$'\n'"TIMEOUT_RC=0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"CANCELLED:124"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"CANCELLED:130"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"SIGNAL_RC=130"* ]]
+}
+
+@test "clean_codex_runtimes sizes manual review by what survives the run" {
+    local iso="$HOME/iso-runtime-survivors"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node"
+touch "$HOME/.cache/codex-runtimes/codex-primary-runtime/runtime.json"
+mkdir -p "$HOME/.cache/codex-runtimes/incomplete-old"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+safe_clean() { echo "SAFE_CLEAN:$2|$1"; rmdir "$1"; }
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() {
+    case "$1" in
+        */codex-primary-runtime) echo 1024 ;;
+        */incomplete-old) echo 4096 ;;
+        */codex-runtimes)
+            if [[ -d "$1/incomplete-old" ]]; then echo 5120; else echo 1024; fi ;;
+        *) return 1 ;;
+    esac
+}
+bytes_to_human() { echo "$(($1 / 1024))KB"; }
+note_activity() { :; }
+clean_codex_runtimes
+[[ ! -d "$HOME/.cache/codex-runtimes/incomplete-old" ]]
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"SAFE_CLEAN:"*"incomplete-old"* ]] || return 1
+    [[ "$output" == *"Codex runtimes · manual review (1024KB)"* ]] || return 1
+    [[ "$output" != *"5120KB"* ]] || return 1
+}
+
+@test "clean_codex_runtimes includes stale directories kept by the cleanup sink" {
+    local iso="$HOME/iso-runtime-refused"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/.cache/codex-runtimes/active/dependencies/node"
+touch "$HOME/.cache/codex-runtimes/active/runtime.json"
+mkdir -p "$HOME/.cache/codex-runtimes/incomplete-old"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+# The real safe_clean contract returns zero when a target is kept after a
+# permission failure or an eligibility filter. A success code is not removal.
+safe_clean() { echo "KEPT:$1"; }
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() {
+    case "$1" in
+        */active) echo 1024 ;;
+        */incomplete-old) echo 4096 ;;
+        */codex-runtimes) echo 5120 ;;
+        *) return 1 ;;
+    esac
+}
+bytes_to_human() { echo "$(($1 / 1024))KB"; }
+note_activity() { :; }
+clean_codex_runtimes
+[[ -d "$HOME/.cache/codex-runtimes/incomplete-old" ]]
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"KEPT:"*"incomplete-old"* ]] || return 1
+    [[ "$output" == *"Codex runtimes · manual review (5120KB)"* ]] || return 1
+}
+
+@test "clean_codex_runtimes dry-run does not predict retained bytes" {
+    local iso="$HOME/iso-runtime-preview"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/.cache/codex-runtimes/active/dependencies/node"
+touch "$HOME/.cache/codex-runtimes/active/runtime.json"
+mkdir -p "$HOME/.cache/codex-runtimes/incomplete-old"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+safe_clean() { echo "PREVIEW:$1"; }
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() { echo 1024; }
+bytes_to_human() { echo "1MB"; }
+note_activity() { :; }
+clean_codex_runtimes
+[[ -d "$HOME/.cache/codex-runtimes/incomplete-old" ]]
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"PREVIEW:"*"incomplete-old"* ]] || return 1
+    [[ "$output" == *"Codex runtimes · manual review"* ]] || return 1
+    [[ "$output" != *"manual review ("* ]] || return 1
+}
+
+@test "clean_codex_runtimes stops before survivor sizing when cleanup is cancelled" {
+    local iso="$HOME/iso-runtime-cancel"
+    local cancel_rc
+    for cancel_rc in 124 130; do
+        run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" CANCEL_RC="$cancel_rc" DRY_RUN=false /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/.cache/codex-runtimes/incomplete-first" "$HOME/.cache/codex-runtimes/incomplete-second"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() { echo UNEXPECTED_SIZE; }
+guard_calls=0
+_codex_runtime_safe_clean_guarded() {
+    guard_calls=$((guard_calls + 1))
+    echo "GUARD:$guard_calls"
+    return "$CANCEL_RC"
+}
+clean_codex_runtimes
+EOF
+
+        [ "$status" -eq "$cancel_rc" ] || return 1
+        [[ "$output" == *"GUARD:1"* ]] || return 1
+        [[ "$output" != *"GUARD:2"* ]] || return 1
+        [[ "$output" != *"UNEXPECTED_SIZE"* ]] || return 1
+        [[ "$output" != *"manual review"* ]] || return 1
+    done
 }
 
 @test "clean_codex_runtimes cleans only stale incomplete runtime dirs" {
@@ -1384,6 +1532,8 @@ EOF
 }
 
 @test "empty Codex cache leaves and fresh staging do not register active cleanup" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local case_home="$HOME/codex-empty-active"
     local cache_root="$case_home/Library/Caches/Codex/Default/Cache"
     local staging_root="$case_home/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
@@ -1411,6 +1561,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging selects only stale first-level installation directories" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local staging_root="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
     rm -rf "$staging_root"
     mkdir -p "$staging_root/stale/Codex.app" "$staging_root/fresh/Codex.app"
@@ -1469,6 +1621,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging rechecks physical containment after sizing" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local case_home="$HOME/codex-staging-containment-race"
     local sparkle_parent="$case_home/Library/Caches/com.openai.codex"
     local sparkle_root="$sparkle_parent/org.sparkle-project.Sparkle"
@@ -1504,6 +1658,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging does not defer compiled-model-only candidates" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local case_home="$HOME/codex-staging-compiled-only"
     local stale="$case_home/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation/stale"
     mkdir -p "$stale/com.apple.e5rt.e5bundlecache"
@@ -1528,6 +1684,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging skips while Codex or Sparkle updater is running" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local staging_root="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
     rm -rf "$staging_root"
     mkdir -p "$staging_root/stale"
@@ -1565,6 +1723,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging skips open files and honors whitelist" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local staging_root="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
     rm -rf "$staging_root"
     mkdir -p "$staging_root/stale"
@@ -1626,6 +1786,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging fails closed when lsof is unavailable" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local staging_root="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
     rm -rf "$staging_root"
     mkdir -p "$staging_root/stale"
@@ -1654,6 +1816,39 @@ EOF
     }
     [[ "$output" == *"open-file check unavailable"* ]] || return 1
     [[ "$output" != *"UNEXPECTED_SAFE_CLEAN"* ]]
+}
+
+@test "the debug flag never changes the codex staging open-file verdict" {
+    # The stderr file is evidence: lsof exit 1 counts as "idle" only when it
+    # is empty. run_with_timeout traces into that stream under MO_DEBUG=1, so
+    # without MO_DEBUG=0 on the capture every idle staging root read as
+    # "could not tell" under --debug. The stub reproduces the trace on purpose.
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+_MOLE_COMPLETE_LSOF_MODE=direct
+mkdir -p "$HOME/codex-staging-idle"
+lsof() { return 1; }
+run_with_timeout() {
+    local duration="$1"
+    shift
+    if [[ "${MO_DEBUG:-0}" == "1" ]]; then
+        echo "[TIMEOUT] Running with ${duration}s timeout: $*" >&2
+    fi
+    "$@"
+}
+export MO_DEBUG=0
+quiet=0
+codex_sparkle_staging_has_open_files "$HOME/codex-staging-idle" || quiet=$?
+export MO_DEBUG=1
+loud=0
+codex_sparkle_staging_has_open_files "$HOME/codex-staging-idle" || loud=$?
+printf 'QUIET=%s LOUD=%s\n' "$quiet" "$loud"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"QUIET=1 LOUD=1"* ]] || { echo "$output"; return 1; }
 }
 
 @test "codex staging treats lsof exit one with stderr as unknown" {
@@ -1702,6 +1897,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging rechecks Codex at the deletion boundary" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local staging_root="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
     rm -rf "$staging_root" "$HOME/codex-staging-probes"
     mkdir -p "$staging_root/stale"
@@ -1734,6 +1931,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging revalidates candidate age before deletion" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local staging_root="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
     rm -rf "$staging_root" "$HOME/codex-staging-age-probes"
     mkdir -p "$staging_root/stale"
@@ -1767,6 +1966,8 @@ EOF
 }
 
 @test "clean_codex_desktop_staging routes dry-run candidates through safe_clean" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     local staging_root="$HOME/Library/Caches/com.openai.codex/org.sparkle-project.Sparkle/Installation"
     rm -rf "$staging_root"
     mkdir -p "$staging_root/stale"
@@ -2827,6 +3028,8 @@ EOF
 }
 
 @test "clean_dev_misc includes Chrome DevTools MCP cache when server not running" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     mkdir -p "$HOME/.cache/chrome-devtools-mcp/chrome-profile/Default/Cache"
     touch "$HOME/.cache/chrome-devtools-mcp/chrome-profile/Default/Cache/data"
 
@@ -2850,6 +3053,8 @@ EOF
 }
 
 @test "clean_dev_misc skips Chrome DevTools MCP cache when server is running" {
+    # Spotlight lists no other Codex copy, as on a machine without Codex.
+    mole_test_fake_command mdfind
     mkdir -p "$HOME/.cache/chrome-devtools-mcp/chrome-profile/Default/Cache"
     touch "$HOME/.cache/chrome-devtools-mcp/chrome-profile/Default/Cache/data"
 

@@ -1,31 +1,19 @@
 #!/usr/bin/env bats
 
-setup_file() {
-	PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-	export PROJECT_ROOT
+load helpers/common
 
-	ORIGINAL_HOME="${HOME:-}"
-	export ORIGINAL_HOME
+setup_file() {
+	mole_test_setup_home completion-home
 
 	ORIGINAL_PATH="${PATH:-}"
 	export ORIGINAL_PATH
-
-	HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-completion-home.XXXXXX")"
-	export HOME
-
-	mkdir -p "$HOME"
 
 	PATH="$PROJECT_ROOT:$PATH"
 	export PATH
 }
 
 teardown_file() {
-	if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-		rm -rf "$HOME"
-	fi
-	if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-		export HOME="$ORIGINAL_HOME"
-	fi
+	mole_test_teardown_home
 	if [[ -n "${ORIGINAL_PATH:-}" ]]; then
 		export PATH="$ORIGINAL_PATH"
 	fi

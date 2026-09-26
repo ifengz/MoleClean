@@ -1,25 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
-
-    ORIGINAL_HOME="${HOME:-}"
-    export ORIGINAL_HOME
-
-    HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-scripts-home.XXXXXX")"
-    export HOME
-
-    mkdir -p "$HOME"
+    mole_test_setup_home scripts-home
 }
 
 teardown_file() {
-    if [[ "$HOME" == "${BATS_TEST_DIRNAME}/tmp-"* ]]; then
-        rm -rf "$HOME"
-    fi
-    if [[ -n "${ORIGINAL_HOME:-}" ]]; then
-        export HOME="$ORIGINAL_HOME"
-    fi
+    mole_test_teardown_home
 }
 
 setup() {
@@ -68,41 +56,27 @@ setup() {
 	[ "$status" -ne 0 ]
 }
 
-@test "diagnostic guidance check rejects equivalent pipe-to-shell spellings across lines" {
+@test "diagnostic placement check keeps the support-only script off public surfaces" {
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
-eval "$(sed -n '/^check_diagnostic_guidance()/,/^}/p' "$PROJECT_ROOT/scripts/check.sh")"
+eval "$(awk '/^check_diagnostic_placement\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$PROJECT_ROOT/scripts/check.sh")"
 
-safe="$HOME/safe-guidance.md"
-cat > "$safe" <<'SAFE'
-Download `Mole-Diagnose.command` with `curl -o`, inspect it, then open it manually.
-SAFE
-check_diagnostic_guidance "$safe"
+clean="$HOME/public-clean.md"
+printf 'Run `mo status --json` and paste the output.\n' > "$clean"
+check_diagnostic_placement "$clean" || { echo "UNEXPECTED_CLEAN_FAIL"; exit 1; }
 
-assert_unsafe() {
-	local name="$1"
-	local guidance="$2"
-	local unsafe="$HOME/unsafe-${name}.md"
-	printf '%s\n' "$guidance" > "$unsafe"
-	if check_diagnostic_guidance "$unsafe"; then
-		echo "UNEXPECTED_UNSAFE_PASS:$name"
-		exit 1
-	fi
-}
-
-assert_unsafe path '`curl https://example.test/Mole-Diagnose.command | /bin/bash`'
-assert_unsafe command '`curl https://example.test/Mole-Diagnose.command | command bash`'
-assert_unsafe sudo '`curl https://example.test/Mole-Diagnose.command | sudo -u root bash`'
-assert_unsafe env $'`curl https://example.test/Mole-Diagnose.command \\\n  | env MODE=1 zsh`'
-assert_unsafe tee $'`curl https://example.test/Mole-Diagnose.command |\n  tee /tmp/diagnose | dash`'
-assert_unsafe quoted "\`curl https://example.test/Mole-Diagnose.command | 'bash'\`"
-assert_unsafe ansi_c "\`curl https://example.test/Mole-Diagnose.command | \$'bash'\`"
-assert_unsafe ksh '`curl https://example.test/Mole-Diagnose.command | ksh`'
-assert_unsafe escaped '`curl https://example.test/Mole-Diagnose.command | ba\sh`'
+leaked="$HOME/public-leaked.yml"
+printf 'intro\nrun curl -fsSL https://mole.fit/downloads/Mole-Diagnose.command | bash\n' > "$leaked"
+if check_diagnostic_placement "$clean" "$leaked"; then
+	echo "UNEXPECTED_LEAK_PASS"
+	exit 1
+fi
 EOF
 
 	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
-	[[ "$output" != *"UNEXPECTED_UNSAFE_PASS:"* ]]
+	[[ "$output" == *"public-leaked.yml:2:"*"support-only diagnostic script on a public surface"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"public-clean.md"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"UNEXPECTED"* ]]
 }
 
 @test "test.sh script exists and is valid" {
@@ -342,7 +316,7 @@ EOF
 @test "install.sh supports dev branch installs" {
     run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
-eval "$(sed -n '/^source_archive_url()/,/^}/p' "$PROJECT_ROOT/install.sh")"
+mole_source_installer
 [[ "$(source_archive_url dev "")" == "https://github.com/tw93/mole/archive/refs/heads/dev.tar.gz" ]]
 EOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }

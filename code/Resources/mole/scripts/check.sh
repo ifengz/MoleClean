@@ -20,42 +20,17 @@ Options:
 EOF
 }
 
-check_diagnostic_guidance() {
+# Mole-Diagnose.command is support-only: a private reply hands it over as one
+# pasted command, and it must never be linked from a public surface such as
+# the README, docs, or issue templates (maintainer 2026-09-21, mirrored from
+# the Mole Mac repo). Maintainer guidance may name it; public pages may not.
+check_diagnostic_placement() {
     local file
     local status=0
 
     for file in "$@"; do
         [[ -f "$file" ]] || continue
-        if ! awk '
-        function inspect_block() {
-            normalized = block
-            gsub(/\$[\047"]/, "", normalized)
-            gsub(/[\047"]/, "", normalized)
-            while (match(normalized, /\\[[:alnum:]_]/)) {
-                normalized = substr(normalized, 1, RSTART - 1) \
-                    substr(normalized, RSTART + 1, 1) \
-                    substr(normalized, RSTART + 2)
-            }
-            if (normalized ~ /Mole-Diagnose[.]command/ &&
-                normalized ~ /\|[[:space:]]*([^|;&[:space:]]+[[:space:]]+)*([^|;&[:space:]]*\/)?(ba|z|da|k)?sh([^[:alnum:]_]|$)/) {
-                printf "%s:%d: unsafe diagnostic pipe-to-shell guidance\n", FILENAME, block_start
-                found = 1
-            }
-            block = ""
-        }
-        /^[[:space:]]*$/ {
-            inspect_block()
-            next
-        }
-        {
-            if (block == "") block_start = FNR
-            block = block " " $0
-        }
-        END {
-            inspect_block()
-            exit found ? 1 : 0
-        }
-        ' "$file"; then
+        if grep -n 'Mole-Diagnose' "$file" | sed "s|^|$file:|; s|\$| (support-only diagnostic script on a public surface)|"; then
             status=1
         fi
     done
@@ -256,12 +231,28 @@ fi
 printf '%s\n' "$destructive_output"
 echo -e "${GREEN}${ICON_SUCCESS} Destructive sink annotation check passed${NC}\n"
 
-diagnostic_guidance_files=(AGENTS.md README.md .claude/skills/*/SKILL.md)
-if ! diagnostic_guidance_output=$(check_diagnostic_guidance "${diagnostic_guidance_files[@]}"); then
-    [[ -n "$diagnostic_guidance_output" ]] && printf '%s\n' "$diagnostic_guidance_output"
-    echo -e "${RED}${ICON_ERROR} Diagnostic instructions must download for review before execution${NC}\n"
+if ! bats_assertion_output=$(python3 "$SCRIPT_DIR/audit_bats_assertions.py" 2>&1); then
+    printf '%s\n' "$bats_assertion_output"
+    echo -e "${RED}${ICON_ERROR} Bats assertions that cannot fail found${NC}\n"
     exit 1
 fi
-echo -e "${GREEN}${ICON_SUCCESS} Diagnostic install guidance passed${NC}\n"
+printf '%s\n' "$bats_assertion_output"
+echo -e "${GREEN}${ICON_SUCCESS} Bats assertion check passed${NC}\n"
+
+if ! timeout_status_output=$(python3 "$SCRIPT_DIR/audit_timeout_status.py" 2>&1); then
+    printf '%s\n' "$timeout_status_output"
+    echo -e "${RED}${ICON_ERROR} Raw timeout status comparisons found${NC}\n"
+    exit 1
+fi
+printf '%s\n' "$timeout_status_output"
+echo -e "${GREEN}${ICON_SUCCESS} Timeout status check passed${NC}\n"
+
+diagnostic_public_files=(README.md CONTRIBUTING.md docs/*.md .github/ISSUE_TEMPLATE/*)
+if ! diagnostic_placement_output=$(check_diagnostic_placement "${diagnostic_public_files[@]}"); then
+    [[ -n "$diagnostic_placement_output" ]] && printf '%s\n' "$diagnostic_placement_output"
+    echo -e "${RED}${ICON_ERROR} The diagnostic script must stay off public pages and issue templates${NC}\n"
+    exit 1
+fi
+echo -e "${GREEN}${ICON_SUCCESS} Diagnostic placement check passed${NC}\n"
 
 echo -e "${GREEN}=== Checks Completed ===${NC}"

@@ -37,6 +37,8 @@ Accounting rules:
 
 `tests/clean_core.bats` contains the preview-versus-summary pattern. Sub-megabyte rounding to zero and per-link hardlink counting belong to this family too.
 
+A section that prints its own result row adds it with `mole_add_cleaned_row <count> <kb>` in `lib/core/file_ops.sh`, which adds the item count, the KB, and one category and treats non-numeric input as zero. Do not write `files_cleaned`, `total_size_cleaned`, or `total_items` directly outside the summary reset and the dry-run ledger render, and never merge the three intentional `start_section` implementations to get there.
+
 ## 10. Silence is read as a freeze
 
 Slow work outside the spinner window looks hung even when it is bounded. A removal loop once stopped its spinner before doing the expensive work (`8f064707`); dotdir, login-item, System Data, and large-file scans have had the same shape.

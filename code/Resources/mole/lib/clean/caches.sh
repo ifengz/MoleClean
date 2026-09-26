@@ -136,7 +136,7 @@ clean_service_worker_cache() {
             if [[ $du_rc -eq 0 ]]; then
                 _du_out=$(run_with_timeout "$du_timeout" du -skP "$cache_dir" 2> /dev/null) || du_rc=$?
             fi
-            if [[ $du_rc -eq 124 || $du_rc -ge 128 ]]; then
+            if mole_rc_timeout_or_signal "$du_rc"; then
                 _mole_record_clean_cancellation "$du_rc"
                 return "$du_rc"
             fi
@@ -164,7 +164,7 @@ clean_service_worker_cache() {
                 safe_remove "$cache_dir" true "$size" "$deadline_seconds" \
                     "$expected_parent" "$expected_parent_id" \
                     "$expected_target_id" || remove_rc=$?
-                if [[ $remove_rc -eq 124 || $remove_rc -ge 128 ]]; then
+                if mole_rc_timeout_or_signal "$remove_rc"; then
                     return "$remove_rc"
                 fi
                 [[ $remove_rc -eq 0 ]] || continue
@@ -378,7 +378,7 @@ scan_project_cache_root() {
 
     if [[ $status -ne 0 ]]; then
         rm -f "$scan_file" "$processed_file" # SAFE: exact scratch files created by create_temp_file above
-        if [[ $status -eq 124 ]]; then
+        if mole_rc_timeout "$status"; then
             debug_log "Project cache scan timed out: $root"
         else
             debug_log "Project cache scan failed (${status}): $root"
@@ -400,7 +400,7 @@ scan_project_cache_root() {
     rm -f "$scan_file" # SAFE: exact scratch file created by create_temp_file above
     if [[ $status -ne 0 ]]; then
         rm -f "$processed_file" # SAFE: exact scratch file created by create_temp_file above
-        if [[ $status -eq 124 ]]; then
+        if mole_rc_timeout "$status"; then
             debug_log "Project cache post-processing timed out: $root"
         else
             debug_log "Project cache post-processing failed (${status}): $root"
@@ -444,7 +444,7 @@ clean_project_cache_target() {
     if declare -f safe_clean > /dev/null 2>&1; then
         local clean_rc=0
         safe_clean "${target_paths[@]}" "$description" || clean_rc=$?
-        if [[ $clean_rc -eq 124 || $clean_rc -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$clean_rc"; then
             return "$clean_rc"
         fi
         return 0
@@ -459,7 +459,7 @@ clean_project_cache_target() {
         [[ -e "$target_path" ]] || continue
         local remove_rc=0
         safe_remove "$target_path" true || remove_rc=$?
-        if [[ $remove_rc -eq 124 || $remove_rc -ge 128 ]]; then
+        if mole_rc_timeout_or_signal "$remove_rc"; then
             return "$remove_rc"
         fi
     done
@@ -617,9 +617,7 @@ clean_python_bytecode_cache_group() {
         fi
     fi
 
-    files_cleaned=$((${files_cleaned:-0} + removed_count))
-    total_size_cleaned=$((${total_size_cleaned:-0} + total_size_kb))
-    total_items=$((${total_items:-0} + 1))
+    mole_add_cleaned_row "$removed_count" "$total_size_kb"
     if declare -f note_activity > /dev/null 2>&1; then
         note_activity
     fi

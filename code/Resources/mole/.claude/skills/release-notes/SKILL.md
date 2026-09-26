@@ -16,7 +16,7 @@ Before drafting, confirm:
 2. **CodeName + emoji**. Ask the user. The title format is `V<version> <CodeName> <emoji>`.
 3. **Release commit range**. `git log <previous-tag>..V<version> --oneline` gives the raw material.
 4. **User-visible behavior changes**. Scan the full commit message bodies (not just subjects) for narrowed detection, removed features, or controlled regressions. These belong in notes even when they are not bug-fix-shaped, because users will encounter the changed boundary in production.
-5. **Issue reporters and PR contributors in this cycle**. Use the merged PRs and fixed issues in the release range. Keep it short, for example `Issue reporters and PR contributors this cycle: @a · @b.` Exclude `tw93` and bots.
+5. **Issue reporters and PR contributors in this cycle**. Derive them from what the release actually contains, never from a date window of closed issues: `git log --format='%an' <prev>..<tag>` for contributors, and the issue numbers the range's own commit messages cite for reporters, checking each is `state_reason: completed` and was fixed here rather than merely referenced as background. A closing window silently pulls in `not_planned` issues and everything the PREVIOUS release fixed, which is how V1.55.0 nearly shipped 30 names where 8 were real. Keep it short, for example `Issue reporters and PR contributors this cycle: @a · @b.` Exclude `tw93`, `youxi798` and bots.
 6. **Verify release exists**. `gh release view V<version> --repo tw93/Mole --json id,name` should return non-empty. If it doesn't, the workflow hasn't finished, wait, don't `gh release create`.
 
 ## Pre-flight (published-tag evidence)

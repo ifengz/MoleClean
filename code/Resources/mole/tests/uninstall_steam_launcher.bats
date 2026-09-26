@@ -1,12 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers/common
+
 # Steam's macOS shortcut for a game is a tiny shell launcher whose bundle
 # size is not the installed game size. Mole should label these bundles as
 # Steam-managed instead of presenting the shortcut size as the app size.
 
 setup_file() {
-    PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
-    export PROJECT_ROOT
+    mole_test_setup_project_root
 }
 
 setup() {
@@ -178,16 +179,15 @@ EOF
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/bin/uninstall.sh"
 source "$PROJECT_ROOT/lib/uninstall/steam.sh"
-eval "$(sed -n '/^uninstall_normalize_size_display()/,/^}/p' "$PROJECT_ROOT/bin/uninstall.sh")"
 printf '%s\n' "$(uninstall_normalize_size_display "93KB" "$HOME/Applications/SteamGame.app")"
 printf '%s\n' "$(uninstall_normalize_size_display "--" "$HOME/Applications/SteamGame.app")"
 printf '%s\n' "$(uninstall_normalize_size_display "420MB" "$HOME/Applications/RegularApp.app")"
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"N/A (Steam-managed)"* ]]
+    [[ "$output" == *"N/A (Steam-managed)"* ]] || return 1
     [[ "$output" != *"93KB"* ]]
 }
 
@@ -197,10 +197,9 @@ EOF
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="dumb" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/bin/uninstall.sh"
 source "$PROJECT_ROOT/lib/uninstall/steam.sh"
 source "$PROJECT_ROOT/lib/ui/app_selector.sh"
-eval "$(sed -n '/^uninstall_normalize_size_display()/,/^}/p' "$PROJECT_ROOT/bin/uninstall.sh")"
 
 apps_data=("1700000000|$HOME/Applications/SteamGame.app|SteamGame|com.example.steamgame|93KB|Today|95")
 selected_apps=()
