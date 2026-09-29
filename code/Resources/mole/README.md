@@ -16,7 +16,7 @@
   <img src="./docs/img/big-mole.png" alt="Mole cleanup results" width="1000" />
 </p>
 
-> 💡 This repo is the free open-source CLI (`mo`). Prefer a native app? [Mole for Mac](https://mole.fit/) is a separate download: cleanup, app management, maintenance, disk maps, and live status in one lightweight, VoiceOver-ready app. One license covers 2 Macs with lifetime updates and a 14-day refund. `brew install mole` installs the CLI only.
+> 💡 This repo is the free open-source CLI (`mo`). Prefer a native app? [Mole for Mac](https://mole.fit/) is a separate download: cleanup, app management, maintenance, disk maps, and live status in one lightweight, VoiceOver-ready app. One license covers 2 Macs with free updates and a 14-day refund. `brew install mole` installs the CLI only.
 
 ## Features
 
@@ -231,6 +231,10 @@ Path patterns work too, so you can keep a long-lived mounted disk image around, 
 
 `mo analyze` opens a terminal disk explorer. It supports arrow keys and Vim navigation, filtering, multi-selection, Finder preview, and confirmed moves to Trash. External drives are skipped from the default overview; inspect them with `mo analyze /Volumes` or a specific mount path. Use `mo analyze /private/tmp` to review user-owned temporary files without turning them into automatic cleanup targets.
 
+A size ending in `+` contains measured bytes from a partial scan; `unknown` means the size could not be measured. Results cut short by temporary failures such as timeouts do not replace complete cached measurements, and a later refresh can recover the missing data. Folders macOS will not let the terminal read stay partial until access changes. The terminal list keeps the 30 largest entries, so an unreadable entry may fall outside that list; the total still indicates a partial scan. Directory JSON output includes all scanned entries.
+
+`mo analyze --json /path` includes `scan_status` on the result and each entry: `complete`, `partial`, or `unavailable`. Numeric sizes contain measured bytes; a zero with `unavailable` does not mean an empty directory. Partial scans still exit successfully, so automation should inspect `scan_status`. Completeness applies within Mole's existing scan exclusions and does not promise an atomic filesystem snapshot.
+
 ```text
 $ mo analyze
 
@@ -374,7 +378,7 @@ When custom paths are configured, Mole scans only those directories. Otherwise, 
 
 ### Installer
 
-`mo installer` finds DMG, PKG, MPKG, ISO, XIP, and installer ZIP files in Downloads, Desktop, Homebrew caches, iCloud, Mail, Telegram, and other supported locations. Each item shows its size and source before removal. Use `mo installer --dry-run` to preview the plan.
+`mo installer` finds DMG, PKG, MPKG, ISO, XIP, and installer ZIP files in Downloads, Desktop, Homebrew caches, iCloud, Mail, Telegram, and other supported locations. Each item shows its size and source before removal. Use `mo installer --dry-run` to preview the plan. Discovery has a cumulative time limit. If a scan or metadata probe fails or times out, Mole discards the list and exits without selecting files; corrupt and unreadable ZIP archives are skipped. Symlinked scan roots are supported, but symlinks beneath them are not followed. Selected files are checked again against their confirmed identity at the deletion boundary.
 
 <details>
 <summary><strong>Installer example output</strong></summary>

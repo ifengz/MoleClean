@@ -368,24 +368,43 @@ _uninstall_unload_launch_plists() {
                 run_with_timeout "$grep_timeout" grep -qF -- \
                     "$app_path" "$plist" 2> /dev/null || grep_rc=$?
             fi
-            mole_rc_timeout_or_signal "$grep_rc" && {
+            # A timeout skips this plist but still tries the rest; only a
+            # signal stops the walk. Later probes share the deadline, so a
+            # spent budget fails fast instead of stalling per plist.
+            if [[ $grep_rc -ge 128 ]]; then
                 result_rc=$grep_rc
                 break
-            }
+            fi
+            if mole_rc_timeout "$grep_rc"; then
+                result_rc=$grep_rc
+                continue
+            fi
             [[ $grep_rc -eq 0 ]] || continue
         fi
         local unload_rc=0
         unload_launch_plist "$plist" "$needs_sudo" \
             "$_MOLE_UNINSTALL_DISCOVERY_DEADLINE" || unload_rc=$?
-        if mole_rc_timeout_or_signal "$unload_rc"; then
+        if [[ $unload_rc -ge 128 ]]; then
             result_rc=$unload_rc
             break
         fi
+        mole_rc_timeout "$unload_rc" && result_rc=$unload_rc
     done < "$scan_file"
     rm -f -- "$scan_file" 2> /dev/null || true # SAFE: exact tracked temp file created above
     if [[ $result_rc -ne 0 ]]; then
         return "$result_rc"
     fi
+    return 0
+}
+
+# One stop_launch_services root. A signal stops the caller; a timeout is
+# recorded in the caller's unload_timeout_rc so the remaining roots still run.
+_stop_launch_services_root() {
+    local root_rc=0
+    _uninstall_unload_launch_plists "$@" || root_rc=$?
+    [[ $root_rc -ge 128 ]] && return "$root_rc"
+    # shellcheck disable=SC2034 # unload_timeout_rc belongs to stop_launch_services via dynamic scope.
+    mole_rc_timeout "$root_rc" && unload_timeout_rc=$root_rc
     return 0
 }
 
@@ -419,18 +438,22 @@ stop_launch_services() {
         bundle_id_usable=false
     fi
 
+    # A timed-out root is remembered and the remaining roots still run, so
+    # one slow plist cannot leave another root's jobs loaded. Signals stop.
+    local unload_timeout_rc=0
+
     if [[ "$bundle_id_usable" == "true" ]] && [[ -d ~/Library/LaunchAgents ]]; then
-        _uninstall_unload_launch_plists \
+        _stop_launch_services_root \
             "$HOME/Library/LaunchAgents" false "$bundle_id" || return $?
     fi
 
     if [[ "$bundle_id_usable" == "true" && "$has_system_files" == "true" && "${MOLE_TEST_MODE:-0}" != "1" && "${MOLE_TEST_NO_AUTH:-0}" != "1" ]]; then
         if [[ -d /Library/LaunchAgents ]]; then
-            _uninstall_unload_launch_plists \
+            _stop_launch_services_root \
                 /Library/LaunchAgents true "$bundle_id" || return $?
         fi
         if [[ -d /Library/LaunchDaemons ]]; then
-            _uninstall_unload_launch_plists \
+            _stop_launch_services_root \
                 /Library/LaunchDaemons true "$bundle_id" || return $?
         fi
     fi
@@ -443,20 +466,21 @@ stop_launch_services() {
     # silently dead inside a NUL-delimited read loop.
     if [[ -n "$app_path" ]]; then
         if [[ -d ~/Library/LaunchAgents ]]; then
-            _uninstall_unload_launch_plists \
+            _stop_launch_services_root \
                 "$HOME/Library/LaunchAgents" false "" "$app_path" || return $?
         fi
         if [[ "$has_system_files" == "true" && "${MOLE_TEST_MODE:-0}" != "1" && "${MOLE_TEST_NO_AUTH:-0}" != "1" ]]; then
             if [[ -d /Library/LaunchAgents ]]; then
-                _uninstall_unload_launch_plists \
+                _stop_launch_services_root \
                     /Library/LaunchAgents true "" "$app_path" || return $?
             fi
             if [[ -d /Library/LaunchDaemons ]]; then
-                _uninstall_unload_launch_plists \
+                _stop_launch_services_root \
                     /Library/LaunchDaemons true "" "$app_path" || return $?
             fi
         fi
     fi
+    return "$unload_timeout_rc"
 }
 
 # Unregister app bundle from LaunchServices before deleting files.
@@ -1390,12 +1414,15 @@ _batch_scan_app_details() {
         elif [[ $live_sibling_rc -ge 128 ]]; then
             return "$live_sibling_rc"
         else
-            # This refusal ends the whole batch, so it must say so on the
-            # normal screen: the debug-only line left users with a silent
-            # exit and no way to report the cause (#1340).
-            log_error "Could not verify whether other installs share ${app_name}'s bundle id; nothing was removed"
-            debug_log "Could not complete the live same-bundle scan for $app_name"
-            return 1
+            # The scan could not run at all (restricted receipts, an
+            # unreadable app root, a receipt path without Info.plist). That
+            # proves nothing either way, and the narrowed plan is safe
+            # whether or not a sibling exists: it removes only the selected,
+            # identity-bound bundle. Refusing here blocked every uninstall
+            # on managed Macs (#1624).
+            live_sibling_present=true
+            log_warning "$(printf "%s: could not check for other copies, so shared leftovers are left in place" "$app_name")"
+            debug_log "Could not complete the live same-bundle scan for $app_name (exit $live_sibling_rc)"
         fi
         local preview_live_sibling_fingerprint="$_MOLE_UNINSTALL_LIVE_SIBLING_FINGERPRINT"
 
@@ -1858,6 +1885,8 @@ _batch_execute_removals() {
         local login_item_helpers=$(decode_bundle_id_list "$encoded_login_item_helpers" "$app_name")
         local reason=""
         local suggestion=""
+        _batch_exec_app_name="$app_name"
+        _batch_exec_stage="app verification"
 
         # Show progress before the pre-teardown verification, not after: the
         # same-bundle re-scan below can take tens of seconds on a large
@@ -1914,11 +1943,12 @@ _batch_execute_removals() {
                     reason="the app installation set changed after preview"
                     suggestion="Select the app again and review the new removal plan"
                 fi
-            elif [[ $live_sibling_rc -eq $MOLE_UNINSTALL_SCAN_PARTIAL &&
+            elif [[ $live_sibling_rc -lt 128 &&
                 "$sibling_guard" == "guard_login" &&
                 -z "$encoded_files" ]]; then
                 # The preview already narrowed this plan to the selected app
-                # bundle alone because the scan could not prove absence. The
+                # bundle alone because the scan could not prove absence, or
+                # could not run at all (#1624). The
                 # re-check hitting the same doubt confirms that state rather
                 # than contradicting it, and a plan with no shared teardown
                 # has nothing a live sibling could lose. Refusing here is what
@@ -1952,14 +1982,23 @@ _batch_execute_removals() {
             fi
         fi
 
+        # Launch service unloads, LaunchServices unregistration, login item
+        # removal, and helper bootout are best-effort teardown: a timeout
+        # skips that step for this app, and only a signal stops the batch.
+        # Treating a timeout as fatal aborted every uninstall on Macs where
+        # osascript waits on the System Events automation prompt.
         if [[ -z "$reason" ]]; then
             local teardown_rc=0
             stop_launch_services \
                 "$bundle_id" "$has_system_files" "$app_path" || teardown_rc=$?
-            mole_rc_timeout_or_signal "$teardown_rc" && return "$teardown_rc"
+            [[ $teardown_rc -ge 128 ]] && return "$teardown_rc"
+            mole_rc_timeout "$teardown_rc" &&
+                debug_log "Launch service unload timed out for $app_name; continuing"
             teardown_rc=0
             unregister_app_bundle "$app_path" || teardown_rc=$?
-            mole_rc_timeout_or_signal "$teardown_rc" && return "$teardown_rc"
+            [[ $teardown_rc -ge 128 ]] && return "$teardown_rc"
+            mole_rc_timeout "$teardown_rc" &&
+                debug_log "LaunchServices unregister timed out for $app_name; continuing"
         fi
 
         # Remove from Login Items. Skipped when the sibling guard flagged a
@@ -1969,7 +2008,9 @@ _batch_execute_removals() {
         if [[ -z "$reason" && "${sibling_guard:-none}" != "guard_login" ]]; then
             local login_remove_rc=0
             remove_login_item "$app_name" "$bundle_id" || login_remove_rc=$?
-            mole_rc_timeout_or_signal "$login_remove_rc" && return "$login_remove_rc"
+            [[ $login_remove_rc -ge 128 ]] && return "$login_remove_rc"
+            mole_rc_timeout "$login_remove_rc" &&
+                debug_log "Login item removal timed out for $app_name; continuing"
         elif [[ -z "$reason" ]]; then
             debug_log "Skipping login item removal for $app_name: name is shared with a surviving install"
         fi
@@ -1994,6 +2035,7 @@ _batch_execute_removals() {
             debug_log "Skipping process termination for $app_name: identifiers are shared with a surviving install"
         fi
 
+        _batch_exec_stage="app removal"
         # Keep the spinner alive through the heavy work. For large apps the
         # main bundle delete alone can take many seconds; for apps with
         # 50-200 leftover files the per-file Trash moves add even more. The
@@ -2158,6 +2200,7 @@ _batch_execute_removals() {
         fi
 
         # Remove related files if app removal succeeded.
+        _batch_exec_stage="leftover removal"
         if [[ -z "$reason" ]]; then
             if [[ -t 1 ]]; then
                 local _phase_prefix=""
@@ -2201,6 +2244,7 @@ _batch_execute_removals() {
                 fi
             fi
 
+            _batch_exec_stage="system file removal"
             if [[ -t 1 ]]; then
                 start_inline_spinner "${_phase_prefix}Cleaning system files for ${app_name}..."
             fi
@@ -2269,7 +2313,9 @@ _batch_execute_removals() {
             if [[ "${sibling_guard:-none}" == "none" ]]; then
                 local bootout_rc=0
                 bootout_login_item_helpers "$login_item_helpers" || bootout_rc=$?
-                mole_rc_timeout_or_signal "$bootout_rc" && return "$bootout_rc"
+                [[ $bootout_rc -ge 128 ]] && return "$bootout_rc"
+                mole_rc_timeout "$bootout_rc" &&
+                    debug_log "Login item helper bootout timed out for $app_name; continuing"
             else
                 debug_log "Skipping login item helper bootout for $app_name: helper ids are shared with a surviving install"
             fi
@@ -2564,7 +2610,9 @@ batch_uninstall_applications() {
     }
 
     _abort_uninstall_batch() {
-        stop_inline_spinner 2> /dev/null || true
+        # stop_inline_spinner erases the spinner line on stderr; silencing it
+        # left "Uninstalling X..." on screen after an abort.
+        stop_inline_spinner || true
         unset MOLE_UNINSTALL_MODE
         _restore_uninstall_traps
     }
@@ -2657,17 +2705,27 @@ batch_uninstall_applications() {
     # know to quit/relaunch the lingering process.
     local -a running_at_uninstall_apps=()
 
+    local _batch_exec_app_name=""
+    local _batch_exec_stage=""
     local _execute_rc=0
     _batch_execute_removals || _execute_rc=$?
     if [[ $_batch_interrupted -eq 1 ]]; then
         _abort_uninstall_batch
         return 130
     fi
-    if mole_rc_timeout_or_signal "$_execute_rc"; then
+    # A signal already echoed through the INT/TERM trap. Anything else must
+    # name the app and step, or the run ends on a bare spinner line.
+    if [[ $_execute_rc -ge 128 ]]; then
         _abort_uninstall_batch
         return "$_execute_rc"
     elif [[ $_execute_rc -ne 0 ]]; then
         _abort_uninstall_batch
+        if mole_rc_timeout "$_execute_rc"; then
+            log_error "Uninstall stopped at ${_batch_exec_app_name}: ${_batch_exec_stage} timed out; apps after it were not touched"
+        else
+            log_error "Uninstall stopped at ${_batch_exec_app_name} during ${_batch_exec_stage} (exit ${_execute_rc}); apps after it were not touched"
+        fi
+        log_info "Run mo uninstall --debug to see which step failed"
         return 1
     fi
 
