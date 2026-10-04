@@ -194,7 +194,7 @@ EOF
 	chmod +x "$bin_dir/defaults"
 
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$bin_dir:$PATH" \
-		MOLE_TEST_NO_AUTH=1 APPS_ROOT="$apps_root" APP_PATH="$app_path" \
+		MOLE_TEST_NO_AUTH=1 MO_DEBUG=1 APPS_ROOT="$apps_root" APP_PATH="$app_path" \
 		APP_MTIME="$app_mtime" SRC_PATH="$src" \
 		/bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
@@ -234,6 +234,8 @@ EOF
 		echo "$output"
 		return 1
 	}
+    [[ "$output" == *"Uninstall finalization: metadata refresh begin"*"Uninstall finalization: metadata refresh launched"*"Uninstall finalization: spinner stopped"* ]] || { echo "$output"; return 1; }
+
 }
 
 @test "app discovery treats the app suffix case-insensitively without admitting nested bundles" {
@@ -763,11 +765,22 @@ set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$HOME/pkg_receipts_cache_test.sh"
 
+receipt_stage=first
+receipt_failure() {
+    local rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    printf 'RECEIPT stage=%s rc=%s seconds=%s timeout=%s perl=%s list_budget=%s scan_budget=%s\n' \
+        "$receipt_stage" "$rc" "$SECONDS" "${MO_TIMEOUT_BIN:-}" "${MO_TIMEOUT_PERL_BIN:-}" \
+        "${MOLE_PKG_RECEIPT_LIST_TIMEOUT:-3}" "${MOLE_PKG_RECEIPT_SCAN_TIMEOUT:-8}" >&2
+}
+trap receipt_failure EXIT
 first=$(pkg_receipt_nonstandard_app_paths --require-complete)
 # Same receipts: the cache may answer, and must still answer correctly.
+receipt_stage=warm
 warm=$(pkg_receipt_nonstandard_app_paths --require-complete)
 # A second package lands. The cached answer is now incomplete.
 printf 'com.example.first\ncom.example.second\n' > "$PKGS_FILE"
+receipt_stage=after
 after=$(pkg_receipt_nonstandard_app_paths --require-complete)
 printf 'FIRST=[%s]\nWARM=[%s]\nAFTER=[%s]\n' \
     "$(printf '%s' "$first" | tr '\n' ' ')" \

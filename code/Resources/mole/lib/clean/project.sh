@@ -749,7 +749,16 @@ scan_purge_targets() {
             emit_valid_cachedir_tag_dirs "$scan_deadline" < "$tag_output" >> "$target_output" || fd_status=$?
         fi
         if [[ $fd_status -eq 0 ]]; then
-            process_scan_results "$target_output" "$scan_deadline" || fd_status=$?
+            local filter_status=0
+            process_scan_results "$target_output" "$scan_deadline" || filter_status=$?
+            if [[ $filter_status -ne 0 ]]; then
+                # Discovery completed. Repeating it cannot repair a failed
+                # shared filter and would spend the remaining root budget twice.
+                cleanup_scan_outputs
+                : > "$output_file"
+                debug_log "Purge result filtering failed (status $filter_status): $search_path"
+                return "$filter_status"
+            fi
         fi
         if [[ $fd_status -eq 0 ]]; then
             debug_log "Using fd for scanning"
@@ -766,7 +775,6 @@ scan_purge_targets() {
     fi
 
     if [[ "$use_find" == "true" ]]; then
-        debug_log "Using find for scanning"
         # Pruned find avoids descending into heavy directories.
         local prune_dirs=(".git" "Library" ".Trash" "Applications")
         local purge_targets=("${PURGE_TARGETS[@]}")
@@ -787,7 +795,13 @@ scan_purge_targets() {
         # `command find` behaves inconsistently in this complex expression.
         local find_status=0
         scan_stage_timeout=$(_mole_timeout_with_deadline "$scan_timeout" "$scan_deadline") || find_status=$?
+        if [[ $find_status -ne 0 ]]; then
+            cleanup_scan_outputs
+            debug_log "Purge discovery budget exhausted before find (status $find_status): $search_path"
+            return "$find_status"
+        fi
         if [[ $find_status -eq 0 ]]; then
+            debug_log "Using find for scanning"
             run_with_timeout "$scan_stage_timeout" find "$search_path" -mindepth "$min_depth" -maxdepth "$max_depth" -type d \
                 \( "${prune_expr[@]}" \) -prune -o \
                 \( "${target_expr[@]}" \) -print -prune \
@@ -807,7 +821,14 @@ scan_purge_targets() {
             emit_valid_cachedir_tag_dirs "$scan_deadline" < "$tag_output" >> "$target_output" || find_status=$?
         fi
         if [[ $find_status -eq 0 ]]; then
-            process_scan_results "$target_output" "$scan_deadline" || find_status=$?
+            local filter_status=0
+            process_scan_results "$target_output" "$scan_deadline" || filter_status=$?
+            if [[ $filter_status -ne 0 ]]; then
+                cleanup_scan_outputs
+                : > "$output_file"
+                debug_log "Purge result filtering failed (status $filter_status): $search_path"
+                return "$filter_status"
+            fi
         fi
 
         cleanup_scan_outputs
@@ -1281,8 +1302,11 @@ select_purge_categories() {
         [[ -n "$_prev_term" ]] && eval "$_prev_term"
         return 0
     }
+    # Prefixed because nested functions are global: a bare handle_interrupt()
+    # would replace bin/purge.sh's handler, which its restored INT/TERM trap
+    # calls by name for the rest of the purge run.
     # shellcheck disable=SC2329
-    handle_interrupt() {
+    _purge_menu_handle_interrupt() {
         restore_terminal
         exit 130
     }
@@ -1520,7 +1544,7 @@ select_purge_categories() {
         fi
     }
     trap restore_terminal EXIT
-    trap handle_interrupt INT TERM
+    trap _purge_menu_handle_interrupt INT TERM
     # Preserve interrupt character for Ctrl-C
     stty -echo -icanon intr ^C 2> /dev/null || true
     hide_cursor
@@ -2080,24 +2104,112 @@ clean_project_artifacts() {
         _activity_total_timeout="$MOLE_TIMEOUT_HINT_SCAN_SEC"
     fi
     local _PURGE_ACTIVITY_DEADLINE_EPOCH=$((_now_epoch + _activity_total_timeout))
+    # A few slow artifacts must not consume every later artifact's opportunity.
+    # Reuse the discovery concurrency ceiling, while keeping the SAME shared
+    # deadline and per-item classifier. Results stay indexed until all workers
+    # finish; only a complete, successful old classification can preselect a row.
+    local -a _activity_pids=() _activity_indexes=() _activity_tmpfiles=() _activity_worker_statuses=()
+    local _activity_setup_failed=false
+    local _activity_interrupt_status=0
+    local _activity_previous_int_trap _activity_previous_term_trap
+    _activity_previous_int_trap=$(trap -p INT || true)
+    _activity_previous_term_trap=$(trap -p TERM || true)
+    trap '[[ $_activity_interrupt_status -ge 128 ]] || _activity_interrupt_status=130' INT
+    trap '[[ $_activity_interrupt_status -ge 128 ]] || _activity_interrupt_status=143' TERM
+    _wait_purge_activity_batch() {
+        local drain="${1:-true}" activity_pid worker_status slot finished
+        while [[ ${#_activity_pids[@]} -gt 0 ]]; do
+            local -a running_pids=() running_indexes=()
+            finished=false
+            for ((slot = 0; slot < ${#_activity_pids[@]}; slot++)); do
+                activity_pid="${_activity_pids[$slot]}"
+                if [[ $_activity_interrupt_status -lt 128 ]] && kill -0 "$activity_pid" 2> /dev/null; then
+                    running_pids+=("$activity_pid")
+                    running_indexes+=("${_activity_indexes[$slot]}")
+                    continue
+                fi
+                worker_status=0
+                wait "$activity_pid" 2> /dev/null || worker_status=$?
+                if [[ $worker_status -ge 128 ]]; then
+                    [[ $_activity_interrupt_status -ge 128 ]] || _activity_interrupt_status=$worker_status
+                    # Interrupted wait can leave its bounded probe alive.
+                    # Drain it instead of orphaning timeout/find children.
+                    while kill -0 "$activity_pid" 2> /dev/null; do
+                        wait "$activity_pid" 2> /dev/null || true
+                    done
+                fi
+                _activity_worker_statuses[${_activity_indexes[$slot]}]=$worker_status
+                finished=true
+            done
+            _activity_pids=("${running_pids[@]+"${running_pids[@]}"}")
+            _activity_indexes=("${running_indexes[@]+"${running_indexes[@]}"}")
+            if [[ "$drain" == false && "$finished" == true && $_activity_interrupt_status -lt 128 ]]; then
+                return 0
+            fi
+            # The trap owns cancellation; interrupted sleep must not trigger
+            # errexit before worker drain and caller-trap restoration.
+            [[ ${#_activity_pids[@]} -eq 0 ]] || sleep 0.02 || true
+        done
+    }
     for item in "${safe_to_clean[@]}"; do
-        local is_recent=true
-        local activity_status=0
-        _PURGE_ACTIVITY_STATE="uncertain"
-        is_recently_modified "$item" "$_now_epoch" || activity_status=$?
-        if [[ $activity_status -ge 128 ]]; then
-            PURGE_RUN_OUTCOME="cancelled"
-            [[ ! -t 1 ]] || stop_inline_spinner
-            return "$activity_status"
+        [[ $_activity_interrupt_status -ge 128 ]] && break
+        local activity_temp
+        if ! activity_temp=$(mktemp); then
+            _activity_setup_failed=true
+            break
         fi
-        # A bounded menu probe may time out: retain that row, unchecked.
-        local activity_state="${_PURGE_ACTIVITY_STATE:-uncertain}"
-        if [[ $activity_status -eq 1 ]]; then
-            is_recent=false
-            activity_state="old"
-        elif [[ "$activity_state" != "recent" ]]; then
+        register_temp_file "$activity_temp"
+        _activity_tmpfiles+=("$activity_temp")
+        (
+            _PURGE_ACTIVITY_STATE="uncertain"
+            activity_status=0
+            is_recently_modified "$item" "$_now_epoch" || activity_status=$?
+            [[ $activity_status -lt 128 ]] || exit "$activity_status"
+            printf '%s %s\n' "$activity_status" "${_PURGE_ACTIVITY_STATE:-uncertain}" > "$activity_temp" || exit 1
+            exit 0
+        ) < /dev/null &
+        _activity_pids+=("$!")
+        _activity_indexes+=("$((${#_activity_tmpfiles[@]} - 1))")
+        if [[ ${#_activity_pids[@]} -ge $max_scan_jobs ]]; then
+            _wait_purge_activity_batch false
+        fi
+    done
+    _wait_purge_activity_batch
+    trap - INT TERM
+    # eval: restore the caller traps captured before starting activity workers.
+    [[ -z "$_activity_previous_int_trap" ]] || eval "$_activity_previous_int_trap"
+    [[ -z "$_activity_previous_term_trap" ]] || eval "$_activity_previous_term_trap"
+    if [[ $_activity_interrupt_status -ge 128 || "$_activity_setup_failed" == true ]]; then
+        for activity_temp in "${_activity_tmpfiles[@]+"${_activity_tmpfiles[@]}"}"; do
+            rm -f "$activity_temp" # SAFE: exact registered mktemp activity result file
+        done
+        if [[ $_activity_interrupt_status -lt 128 ]]; then
+            PURGE_RUN_OUTCOME="incomplete"
+            [[ ! -t 1 ]] || stop_inline_spinner
+            return 1
+        fi
+        PURGE_RUN_OUTCOME="cancelled"
+        [[ ! -t 1 ]] || stop_inline_spinner
+        return "$_activity_interrupt_status"
+    fi
+    local activity_index=0
+    for activity_temp in "${_activity_tmpfiles[@]}"; do
+        local is_recent=true activity_status="" activity_state="uncertain" activity_extra=""
+        # Only a complete record from a successful worker can preselect a row.
+        # A truncated first field must never turn unknown evidence into old.
+        if [[ "${_activity_worker_statuses[$activity_index]:-1}" == "0" ]] &&
+            read -r activity_status activity_state activity_extra < "$activity_temp" &&
+            [[ -z "$activity_extra" ]]; then
+            if [[ "$activity_status" == "1" && "$activity_state" == "old" ]]; then
+                is_recent=false
+            elif [[ "$activity_status" != "0" || "$activity_state" != "recent" ]]; then
+                activity_state="uncertain"
+            fi
+        else
             activity_state="uncertain"
         fi
+        rm -f "$activity_temp" # SAFE: exact registered mktemp activity result file
+        activity_index=$((activity_index + 1))
         safe_recent_flags+=("$is_recent")
         safe_activity_states+=("$activity_state")
     done

@@ -34,6 +34,42 @@ source "$PROJECT_ROOT/lib/core/common.sh"
 EOF
 }
 
+# Exercise the real result handling with only a sandboxed AppleScript fixture.
+run_finder_result_fixture() {
+    mkdir -p "$SANDBOX/FinderFixture.app"
+    run env PROJECT_ROOT="$PROJECT_ROOT" FIXTURE_RC="$1" FIXTURE_MOVE="${2:-0}" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+fixture="$SANDBOX/FinderFixture.app"
+_mole_path_is_application_bundle() { [[ "$1" == "$fixture" ]]; }
+_mole_trash_target_still_safe() { [[ "$1" == "$fixture" ]]; }
+_mole_owned_path_still_valid() { [[ "$1" == "$fixture" ]]; }
+debug_log() { printf '%s\n' "$*" >> "$SANDBOX/finder-debug.log"; }
+run_with_timeout() {
+    [[ $# -eq 4 && "$1" == "$MOLE_TIMEOUT_DISK_VERIFY_SEC" && "$2" == osascript && "$3" == - && "$4" == "$fixture" ]] || return 97
+    shift
+    "$@"
+}
+osascript() {
+    [[ $# -eq 2 && "$1" == - && "$2" == "$fixture" ]] || return 98
+    cat > "$SANDBOX/finder-script"
+    printf 'FINDER_STDOUT_MUST_STAY_HIDDEN\n'
+    printf 'Finder fixture diagnostic (-1743)\n' >&2
+    if [[ "$FIXTURE_MOVE" == 1 ]]; then
+        mv "$fixture" "$SANDBOX/MovedFixture.app"
+    fi
+    return "$FIXTURE_RC"
+}
+rc=0
+_mole_move_app_to_trash_via_finder "$fixture" || rc=$?
+printf 'RC=%s\n' "$rc"
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"FINDER_STDOUT_MUST_STAY_HIDDEN"* ]] || return 1
+    [[ "$output" != *"Finder fixture diagnostic"* ]] || return 1
+    [[ -s "$SANDBOX/finder-script" ]]
+}
+
 @test "mole_delete defaults to permanent mode and removes the target" {
     local victim="$SANDBOX/victim"
     mkdir -p "$victim"
@@ -203,6 +239,54 @@ EOF
     [ "$status_col" = "ok" ]
 }
 
+@test "sudo Trash ownership refusal keeps the item and clears its empty stage" {
+    local victim="$SANDBOX/owned-agent.plist"
+    local stage="$SANDBOX/stage-refused-agent"
+    local fake_bin="$SANDBOX/bin"
+    mkdir -p "$fake_bin" "$SANDBOX/home"
+    printf 'original\n' > "$victim"
+    cat > "$fake_bin/sudo" <<'SH'
+#!/bin/bash
+[[ "${1:-}" == "-n" ]] && shift
+"$@"
+SH
+    chmod +x "$fake_bin/sudo"
+
+    run env PROJECT_ROOT="$PROJECT_ROOT" SANDBOX="$SANDBOX" \
+        MOLE_DELETE_LOG="$MOLE_DELETE_LOG" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+unset MOLE_TEST_TRASH_DIR MOLE_TEST_NO_AUTH
+export MOLE_DELETE_MODE=trash
+export HOME="$SANDBOX/home"
+export PATH="$SANDBOX/bin:$PATH"
+victim="$SANDBOX/owned-agent.plist"
+stage="$SANDBOX/stage-refused-agent"
+identity=$(mole_deletion_identity "$victim")
+digest=$(mole_file_sha256 "$victim")
+_mole_privileged_path_has_mutable_ancestor() { return 1; }
+_mole_create_privileged_trash_stage() {
+    mkdir -p "$stage"
+    printf '%s\n' "$stage"
+}
+_mole_trash_target_still_safe() {
+    printf 'new owner\n' > "$victim"
+    return 0
+}
+rc=0
+mole_delete "$victim" true "$identity" "$digest" || rc=$?
+[[ $rc -ne 0 && -f "$victim" && ! -e "$stage" ]] || exit 1
+grep -q $'\townership-unverified\t' "$MOLE_DELETE_LOG"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"agent file changed or could not be inspected"* ]] || return 1
+    [[ "$output" != *"Trash unavailable"* ]]
+}
+
 @test "mole_delete refuses symlinked invoking user Trash for sudo-required paths" {
     local victim="$SANDBOX/victim_sudo_symlink_trash"
     local fake_bin="$SANDBOX/bin"
@@ -368,8 +452,8 @@ osascript() {
     return 98
 }
 _mole_path_requires_direct_trash "/Applications/Microsoft Word.app"
-! _mole_path_requires_direct_trash "/Applications/Utilities/Microsoft Word.app"
-! _mole_path_requires_direct_trash "/Applications/Microsoft Word.app/Contents"
+! _mole_path_requires_direct_trash "/Applications/Utilities/Microsoft Word.app" || exit 1
+! _mole_path_requires_direct_trash "/Applications/Microsoft Word.app/Contents" || exit 1
 _mole_move_to_trash "/Applications/Microsoft Word.app" false
 EOF
 
@@ -671,7 +755,8 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ -d "$victim" ]] || return 1
-    [[ "$output" == *"App Management, App Data, or Full Disk Access"* ]] || return 1
+    [[ "$output" == *"Try moving the item to Trash in Finder. Run with --debug for details"* ]] || return 1
+    [[ "$output" != *"Full Disk Access"* ]] || return 1
     [[ "$output" != *"Touch ID"* ]] || return 1
     [[ "$output" == *"RC=14"* ]] || return 1
     [[ ! -s "$trace" ]] || return 1
@@ -747,15 +832,16 @@ EOF
     [[ "$output" == *"refusing permanent delete"* ]]
 }
 
-@test "privacy denial diagnosis recommends terminal privacy access, not Touch ID" {
+@test "privacy denial diagnosis offers Finder and debug without guessing a permission pane" {
     run /bin/bash --noprofile --norc <<EOF
 $(prelude)
 diagnose_removal_failure "\$MOLE_ERR_PRIVACY_DENIED" "Microsoft Word"
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"macOS could not authorize Trash access"* ]] || return 1
-    [[ "$output" == *"App Management, App Data, or Full Disk Access"* ]] || return 1
+    [[ "$output" == *"macOS denied Trash access"* ]] || return 1
+    [[ "$output" == *"Try moving the item to Trash in Finder. Run with --debug for details"* ]] || return 1
+    [[ "$output" != *"Full Disk Access"* ]] || return 1
     [[ "$output" != *"touchid"* ]] || return 1
     [[ "$output" != *"Touch ID"* ]]
 }
@@ -1496,4 +1582,146 @@ EOF
     [ "$status" -ne 0 ] || return 1
     # Nothing privileged may run against a symlinked root.
     [[ ! -s "$trace" ]]
+}
+
+
+@test "Finder automation denial names the permission and records the actual error (#1644)" {
+    run_finder_result_fixture 1
+    [[ "$output" == *"Privacy & Security > Automation"* ]] || return 1
+    [[ "$output" == *"RC=1"* ]] || return 1
+    [[ -d "$SANDBOX/FinderFixture.app" ]] || return 1
+    local diagnostic
+    diagnostic=$(cat "$SANDBOX/finder-debug.log")
+    [[ "$diagnostic" == *"(exit 1)"* ]] || return 1
+    [[ "$diagnostic" == *"Finder fixture diagnostic (-1743)"* ]] || return 1
+    [[ "$diagnostic" != *"FINDER_STDOUT_MUST_STAY_HIDDEN"* ]]
+}
+
+@test "Finder success with a surviving app is diagnosed as an incomplete move" {
+    run_finder_result_fixture 0
+    [[ "$output" == "RC=1" ]] || return 1
+    [[ -d "$SANDBOX/FinderFixture.app" ]] || return 1
+    [[ "$(cat "$SANDBOX/finder-debug.log")" == *"Finder returned success but the application remains:"* ]]
+}
+
+@test "Finder timeout and signal preserve status and failure diagnostics" {
+    local rc diagnostic
+    for rc in 124 130; do
+        : > "$SANDBOX/finder-debug.log"
+        run_finder_result_fixture "$rc"
+        [[ "$output" == "RC=$rc" ]] || return 1
+        [[ -d "$SANDBOX/FinderFixture.app" ]] || return 1
+        diagnostic=$(cat "$SANDBOX/finder-debug.log")
+        [[ "$diagnostic" == *"(exit $rc)"* ]] || return 1
+        [[ "$diagnostic" == *"Finder fixture diagnostic (-1743)"* ]] || return 1
+    done
+}
+
+@test "Finder successful mock move remains quiet and verifies the survivor" {
+    run_finder_result_fixture 0 1
+    [[ "$output" == "RC=0" ]] || return 1
+    [[ ! -e "$SANDBOX/FinderFixture.app" && -d "$SANDBOX/MovedFixture.app" ]] || return 1
+    [[ "$(cat "$SANDBOX/finder-debug.log")" == *"Finder moved application to Trash:"* ]]
+}
+
+@test "Trash no-auth guard prevents both direct and Finder execution" {
+    run /bin/bash --noprofile --norc <<EOF
+$(prelude)
+unset MOLE_TEST_TRASH_DIR
+_mole_move_path_to_user_trash() { echo UNEXPECTED_DIRECT; return 99; }
+_mole_move_app_to_trash_via_finder() { echo UNEXPECTED_FINDER; return 99; }
+rc=0
+_mole_move_to_trash /Applications/Fixture.app false || rc=\$?
+printf 'RC=%s\n' "\$rc"
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == "RC=1" ]]
+}
+
+
+@test "mole_delete preserves validation cancellation status" {
+    local probe_rc failures=0
+    for probe_rc in 1 124 130; do
+        run env PROJECT_ROOT="$PROJECT_ROOT" PROBE_RC="$probe_rc" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+export MOLE_CURRENT_COMMAND=uninstall
+victim="$SANDBOX/validation-victim"
+mkdir -p "$victim"
+validate_path_for_deletion() { return "$PROBE_RC"; }
+get_path_size_kb() { echo UNEXPECTED_SIZE_PROBE; return 97; }
+rc=0
+mole_delete "$victim" false || rc=$?
+[[ $rc -eq $PROBE_RC && -d "$victim" ]] || exit 1
+case "$PROBE_RC" in
+    1) reason=rejected ;;
+    124) reason=timed-out ;;
+    130) reason=interrupted ;;
+esac
+grep -q "$(printf '\t%s\t' "$reason")" "$MOLE_DELETE_LOG" || exit 1
+EOF
+        [ "$status" -eq 0 ] || { echo "probe=$probe_rc: $output"; failures=$((failures + 1)); }
+        [[ "$output" != *UNEXPECTED_SIZE_PROBE* ]] || return 1
+    done
+    [ "$failures" -eq 0 ]
+}
+
+@test "Trash batch preserves cancellation and completed paths at both sinks" {
+    local probe_rc sink failures=0
+    for sink in direct test-trash; do
+        for probe_rc in 1 124 130; do
+            run env PROJECT_ROOT="$PROJECT_ROOT" PROBE_RC="$probe_rc" SINK="$sink" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+export MOLE_CURRENT_COMMAND=uninstall
+fixture="$SANDBOX/batch-$SINK-$PROBE_RC"
+mkdir -p "$fixture/first" "$fixture/second" "$fixture/third"
+first="$fixture/first"
+second="$fixture/second"
+third="$fixture/third"
+if [[ "$SINK" == direct ]]; then
+    unset MOLE_TEST_TRASH_DIR
+    MOLE_TEST_NO_AUTH=0
+    _mole_move_path_to_user_trash() {
+        printf '%s\n' "$1" >> "$fixture/trace"
+        [[ "$1" == "$second" ]] && return "$PROBE_RC"
+        rmdir "$1"
+    }
+else
+    MOLE_TEST_TRASH_DIR="$fixture/Trash"
+    _mole_trash_target_still_safe() {
+        printf '%s\n' "$1" >> "$fixture/trace"
+        [[ "$1" == "$second" ]] && return "$PROBE_RC"
+        return 0
+    }
+fi
+rc=0
+_mole_move_to_trash_batch "$first" "$second" "$third" || rc=$?
+[[ $rc -eq $PROBE_RC ]] || exit 1
+[[ ! -e "$first" && -d "$second" ]] || exit 1
+[[ "${_MOLE_TRASH_BATCH_MOVED_PATHS[0]}" == "$first" ]] || exit 1
+grep -Fxq "$first" "$fixture/trace" || exit 1
+grep -Fxq "$second" "$fixture/trace" || exit 1
+if [[ "$SINK" == direct && $PROBE_RC -eq 1 ]]; then
+    [[ ! -e "$third" && ${#_MOLE_TRASH_BATCH_MOVED_PATHS[@]} -eq 2 ]] || exit 1
+    grep -Fxq "$third" "$fixture/trace" || exit 1
+else
+    [[ -d "$third" && ${#_MOLE_TRASH_BATCH_MOVED_PATHS[@]} -eq 1 ]] || exit 1
+    ! grep -Fxq "$third" "$fixture/trace" || exit 1
+fi
+[[ -z "$_MOLE_TRASH_MOVE_EXPECTED_PATH" && -z "$_MOLE_TRASH_MOVE_EXPECTED_PARENT" &&
+    -z "$_MOLE_TRASH_MOVE_EXPECTED_PARENT_ID" && -z "$_MOLE_TRASH_MOVE_EXPECTED_TARGET_ID" ]] || exit 1
+EOF
+            [ "$status" -eq 0 ] || { echo "sink=$sink probe=$probe_rc: $output"; failures=$((failures + 1)); }
+        done
+    done
+    [ "$failures" -eq 0 ]
+}
+
+@test "Finder Automation denial is explained after an earlier generic privacy refusal (#1644)" {
+    export _MOLE_PRIVACY_DENIED_WARNED=1
+    run_finder_result_fixture 1
+    [[ "$output" == *"Privacy & Security > Automation"* ]] || return 1
+    [[ "$output" == *"RC=1"* ]] || return 1
+    [[ -d "$SANDBOX/FinderFixture.app" ]] || return 1
 }

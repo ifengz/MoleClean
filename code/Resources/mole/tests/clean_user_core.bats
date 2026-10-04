@@ -489,7 +489,7 @@ EOF
     rm -rf "$test_home"
 }
 
-@test "a custom whitelist still protects system caches and Poetry virtualenvs" {
+@test "a custom whitelist still protects system caches, Poetry virtualenvs and the renv cache" {
     # clean_user_essentials sweeps every child of ~/Library/Caches, and
     # load_mole_whitelist replaces DEFAULT_WHITELIST_PATTERNS wholesale once a
     # user saves one entry of their own. Anything that breaks macOS search,
@@ -500,7 +500,9 @@ EOF
         "$test_home/Library/Caches/com.apple.spotlight" \
         "$test_home/Library/Caches/com.apple.FontRegistry" \
         "$test_home/Library/Caches/CloudKit" \
-        "$test_home/Library/Caches/pypoetry/virtualenvs/proj-abc123"
+        "$test_home/Library/Caches/pypoetry/virtualenvs/proj-abc123" \
+        "$test_home/Library/Caches/org.R-project.R/R/renv/cache/v5/pkg" \
+        "$test_home/Library/Caches/com.example.unprotected"
     printf '%s\n' "$test_home/.cache/keep-my-own-thing/*" > "$test_home/.config/mole/whitelist"
 
     run env HOME="$test_home" PROJECT_ROOT="$PROJECT_ROOT" \
@@ -512,7 +514,10 @@ for probe in \
     "$HOME/Library/Caches/com.apple.spotlight" \
     "$HOME/Library/Caches/com.apple.FontRegistry" \
     "$HOME/Library/Caches/CloudKit" \
-    "$HOME/Library/Caches/pypoetry/virtualenvs/proj-abc123"; do
+    "$HOME/Library/Caches/pypoetry/virtualenvs/proj-abc123" \
+    "$HOME/Library/Caches/org.R-project.R/R/renv/cache/v5/pkg" \
+    "$HOME/Library/Caches/org.R-project.R" \
+    "$HOME/Library/Caches/com.example.unprotected"; do
     if is_path_whitelisted "$probe"; then
         printf 'PROTECTED=%s\n' "${probe#"$HOME"/}"
     else
@@ -524,12 +529,22 @@ is_path_whitelisted "$HOME/.cache/keep-my-own-thing/x" && printf 'CUSTOM_KEPT\n'
 EOF
 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" != *"EXPOSED="* ]] || {
+    # The one ordinary cache is the positive control: the sweep must still
+    # reach it, or the probes above prove nothing.
+    [[ "$output" == *"EXPOSED=Library/Caches/com.example.unprotected"* ]] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$(grep -c "EXPOSED=" <<< "$output")" -eq 1 ]] || {
         echo "$output"
         return 1
     }
     [[ "$output" == *"PROTECTED=Library/Caches/com.apple.spotlight"* ]] || return 1
     [[ "$output" == *"PROTECTED=Library/Caches/pypoetry/virtualenvs/proj-abc123"* ]] || return 1
+    [[ "$output" == *"PROTECTED=Library/Caches/org.R-project.R/R/renv/cache/v5/pkg"* ]] || return 1
+    # The sweep removes top-level children of ~/Library/Caches, so the parent
+    # is the path that actually has to hold.
+    [[ "$output" == *"PROTECTED=Library/Caches/org.R-project.R"$'\n'* ]] || return 1
     [[ "$output" == *"CUSTOM_KEPT"* ]] || return 1
     rm -rf "$test_home"
 }
@@ -1427,12 +1442,16 @@ safe_clean() {
 files_cleaned=0
 total_size_cleaned=0
 total_items=0
+# clean_utm_caches only reaches its sinks when a UTM target exists.
+mkdir -p "$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Caches"
+echo x > "$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Caches/blob"
 
 clean_app_caches
 clean_office_applications
 clean_utm_caches
 EOF
 
+    rm -rf "$HOME/Library/Containers/com.utmapp.UTM"
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"SCOPED=Wallpaper agent cache"* ]] || return 1
     [[ "$output" == *"SCOPED=Microsoft Word container cache"* ]] || return 1
@@ -2228,6 +2247,92 @@ EOF
     rm -rf "$HOME/Library"
 }
 
+@test "user cleanup process guards keep caches when pgrep cannot tell" {
+    # These guards used `pgrep -x App && running=true` or `if pgrep; then
+    # skip`, so a pgrep error (exit 2/3, or no pgrep) read as "not running"
+    # and the cleanup ran against a possibly live app. Each case runs with
+    # pgrep reporting a clean miss first, proving the fixture reaches the
+    # sink, then with pgrep failing, where the sink must not run.
+    local row case_name sink display_name pgrep_rc case_home failures=""
+    for row in \
+        "mail|Mail Downloads/old.bin|Mail Downloads" \
+        "arc|Arc code cache|Arc profile caches" \
+        "brave|Brave code cache|Brave profile caches" \
+        "vivaldi|Vivaldi code cache|Vivaldi profile caches" \
+        "qqbrowser|QQ Browser code cache|QQ Browser profile caches" \
+        "utm|UTM app cache|UTM caches"; do
+        IFS='|' read -r case_name sink display_name <<< "$row"
+        for pgrep_rc in 1 2; do
+            case_home="$HOME/pgrep-unknown-$case_name-$pgrep_rc"
+            mkdir -p "$case_home"
+            run env HOME="$case_home" PROJECT_ROOT="$PROJECT_ROOT" \
+                CASE="$case_name" PGREP_RC="$pgrep_rc" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+pgrep() { return "$PGREP_RC"; }
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+clean_service_worker_cache() { :; }
+get_path_size_kb() { echo 6000; }
+safe_clean() { local n=$#; echo "SINK:${!n}"; }
+safe_remove() { echo "SINK:$1"; }
+support="$HOME/Library/Application Support"
+case "$CASE" in
+    mail)
+        mkdir -p "$HOME/Library/Mail Downloads"
+        echo x > "$HOME/Library/Mail Downloads/old.bin"
+        touch -t 202401010000 "$HOME/Library/Mail Downloads/old.bin"
+        _clean_mail_downloads
+        ;;
+    arc)
+        mkdir -p "$support/Arc/User Data/Default/Code Cache"
+        clean_browsers
+        ;;
+    brave)
+        mkdir -p "$support/BraveSoftware/Brave-Browser/Default/Code Cache"
+        clean_browsers
+        ;;
+    vivaldi)
+        mkdir -p "$support/Vivaldi/Default/Code Cache"
+        clean_browsers
+        ;;
+    qqbrowser)
+        mkdir -p "$support/QQBrowser3/Default/Code Cache"
+        clean_browsers
+        ;;
+    utm)
+        mkdir -p "$HOME/Library/Caches/com.utmapp.UTM"
+        echo x > "$HOME/Library/Caches/com.utmapp.UTM/blob"
+        clean_utm_caches
+        ;;
+esac
+EOF
+            rm -rf "$case_home"
+            if [[ "$status" -ne 0 ]]; then
+                failures+="$case_name pgrep=$pgrep_rc exited $status: $output"$'\n'
+            elif [[ $pgrep_rc -eq 1 ]]; then
+                if [[ "$output" != *"SINK:"*"$sink"* ]]; then
+                    failures+="$case_name positive control never reached the sink: $output"$'\n'
+                fi
+            else
+                if [[ "$output" == *"SINK:"*"$sink"* ]]; then
+                    failures+="$case_name cleaned while pgrep could not tell"$'\n'
+                fi
+                if [[ "$output" != *"$display_name · stopped (process state unknown)"* ]]; then
+                    failures+="$case_name did not report the unknown process state"$'\n'
+                fi
+            fi
+        done
+    done
+    # Every row runs before failing, so one red run names every broken guard.
+    [ -z "$failures" ] || {
+        printf '%s' "$failures"
+        return 1
+    }
+}
+
 @test "clean_application_support_logs skips when no access" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -2587,6 +2692,72 @@ EOF
         [ -d "$review_home/.cache/huggingface/hub" ] &&
         [ -d "$review_home/.local/share/mise/installs/node/22.1.0" ] &&
         [ -d "$review_home/.gradle/caches/modules-2" ]
+}
+
+@test "large files reviews installed FVM Flutter SDKs without deleting" {
+    local review_home="$HOME/large-review-fvm"
+    mkdir -p "$review_home/fvm/versions/3.47.5" "$review_home/custom-fvm/versions/3.44.0"
+
+    local fvm_env
+    for fvm_env in default custom; do
+        if [[ "$fvm_env" == "default" ]]; then
+            run env -u FVM_CACHE_PATH HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" \
+                /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+du() { printf '2097152 %s\n' "${2:-/tmp}"; }
+format_path_link() { printf '%s' "$1"; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+check_large_file_candidates
+EOF
+        else
+            run env FVM_CACHE_PATH="$review_home/custom-fvm" HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" \
+                /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+du() { printf '2097152 %s\n' "${2:-/tmp}"; }
+format_path_link() { printf '%s' "$1"; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+check_large_file_candidates
+EOF
+        fi
+        [ "$status" -eq 0 ] || {
+            echo "$fvm_env: $output"
+            return 1
+        }
+        if [[ "$fvm_env" == "default" ]]; then
+            [[ "$output" == *"FVM Flutter SDKs"*"$review_home/fvm/versions"* ]] || {
+                echo "$fvm_env: $output"
+                return 1
+            }
+        else
+            [[ "$output" == *"FVM Flutter SDKs"*"$review_home/custom-fvm/versions"* ]] || {
+                echo "$fvm_env: $output"
+                return 1
+            }
+        fi
+    done
+    # Report only: both SDK folders must still exist afterwards.
+    [ -d "$review_home/fvm/versions/3.47.5" ] &&
+        [ -d "$review_home/custom-fvm/versions/3.44.0" ]
 }
 
 @test "large files dates the irreplaceable rows and leaves caches undated" {
