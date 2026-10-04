@@ -752,7 +752,7 @@ mkdir -p "$library/Event/Original Media/Render Files/High Quality Media"
 mkdir -p "$library/Event/Transcoded Media/High Quality Media"
 
 is_final_cut_pro_generated_cache_target "$library" "$library/Event/Render Files/High Quality Media"
-! is_final_cut_pro_generated_cache_target "$library" "$library/Event/Original Media/Render Files/High Quality Media"
+! is_final_cut_pro_generated_cache_target "$library" "$library/Event/Original Media/Render Files/High Quality Media" || exit 1
 ! is_final_cut_pro_generated_cache_target "$library" "$library/Event/Transcoded Media/High Quality Media"
 EOF
 
@@ -1902,6 +1902,7 @@ INNER
 }
 
 @test "safe_remove deletes an idle reverse-DNS user cache" {
+    mole_test_fake_command lsof 'exit 1'
     mkdir -p "$HOME/Library/Caches/com.example.idleapp"
     local db="$HOME/Library/Caches/com.example.idleapp/Cache.db"
     touch "$db"
@@ -1910,8 +1911,7 @@ INNER
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 _MOLE_COMPLETE_LSOF_MODE=direct
-pgrep() { return 1; }
-lsof() { return 1; }
+ps() { printf '%s\n' '  PID  PPID COMM ARGS'; }
 oplog_enabled() { return 1; }
 log_operation() { :; }
 debug_log() { :; }
@@ -1921,7 +1921,10 @@ safe_remove "$db" true
 [[ ! -e "$db" ]]
 INNER
 
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
     [[ ! -e "$db" ]]
 }
 
@@ -2930,4 +2933,27 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"CLEAN:$ext_root/remove-true"* ]] || return 1
     [[ "$output" != *"CLEAN:$ext_root/keep-"* ]] || return 1
+}
+
+@test "code editor VSIX download caches stay separate from installed extensions (#1654)" {
+    mkdir -p "$HOME/.vscode/extensions/keep-active-1654"
+    touch "$HOME/.vscode/extensions/keep-active-1654/package.json"
+    for editor in Code Cursor; do
+        mkdir -p "$HOME/Library/Application Support/$editor/CachedExtensionVSIXs"
+        mkdir -p "$HOME/Library/Application Support/$editor/User"
+        touch "$HOME/Library/Application Support/$editor/CachedExtensionVSIXs/example.vsix"
+        touch "$HOME/Library/Application Support/$editor/User/settings.json"
+    done
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { printf 'CLEAN:%s\n' "$1"; }
+clean_code_editors
+EOF
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"Code/CachedExtensionVSIXs/example.vsix"* ]] || return 1
+    [[ "$output" == *"Cursor/CachedExtensionVSIXs/example.vsix"* ]] || return 1
+    [[ "$output" != *"/User/"* ]] || return 1
+    [[ "$output" != *"/.vscode/extensions/keep-active-1654"* ]] || return 1
 }

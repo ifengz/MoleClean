@@ -1767,7 +1767,7 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"skipped (open-file check unavailable)"* ]] || return 1
-    [[ "$output" == *"CANCEL=124"* ]] || return 1
+    [[ "$output" == *"CANCEL=0"* ]] || return 1
     [[ "$output" != *"SAFE_CLEAN:"* ]] || return 1
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true /bin/bash --noprofile --norc << 'EOF'
@@ -1992,7 +1992,7 @@ EOF
 }
 
 @test "clean_dev_mise respects MISE_CACHE_DIR and only targets cache" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MISE_CACHE_DIR="/tmp/mise-cache" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="/usr/bin:/bin" MISE_CACHE_DIR="/tmp/mise-cache" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/dev.sh"
@@ -3197,6 +3197,88 @@ EOF
     [ -z "$output" ]
 }
 
+# Each case below gets its own HOME: they assert exact row counts, and the
+# shared file HOME already holds other worktree fixtures.
+_worktree_hint_run() {
+    run env HOME="$1" PROJECT_ROOT="$PROJECT_ROOT" MOLE_CURRENT_COMMAND=clean \
+        SIZE_STUB_RC="${2:-0}" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+note_activity() { :; }
+run_with_timeout() { shift; "$@"; }
+get_path_size_kb() {
+    [[ "$SIZE_STUB_RC" == "0" ]] || return "$SIZE_STUB_RC"
+    echo "2097152"
+}
+rc=0
+report_agent_worktree_candidates || rc=$?
+printf 'RC=%s CANCEL=%s\n' "$rc" "${MOLE_CLEAN_CANCEL_STATUS:-none}"
+EOF
+}
+
+@test "report_agent_worktree_candidates reports a case-variant root once" {
+    local test_home="$HOME/wt-case-home"
+    mkdir -p "$test_home/code/proj/.claude/worktrees/wt-one"
+    # ~/Code only aliases ~/code on a case-insensitive volume.
+    [[ -d "$test_home/Code" ]] || skip "case-sensitive filesystem"
+
+    _worktree_hint_run "$test_home"
+
+    [ "$status" -eq 0 ] || return 1
+    local rows
+    rows=$(grep -c "AI agent worktrees" <<< "$output" || true)
+    [ "$rows" -eq 1 ]
+}
+
+@test "report_agent_worktree_candidates reports a container once when one root links into another" {
+    local test_home="$HOME/wt-link-home"
+    mkdir -p "$test_home/code/sub/proj/.claude/worktrees/wt-one"
+    ln -s "$test_home/code/sub" "$test_home/dev"
+
+    _worktree_hint_run "$test_home"
+
+    [ "$status" -eq 0 ] || return 1
+    local rows
+    rows=$(grep -c "AI agent worktrees" <<< "$output" || true)
+    [ "$rows" -eq 1 ]
+}
+
+@test "report_agent_worktree_candidates reports the Codex worktree container" {
+    local test_home="$HOME/wt-codex-home"
+    mkdir -p "$test_home/.codex/worktrees/topic/repo"
+    echo "data" > "$test_home/.codex/worktrees/topic/repo/file"
+
+    _worktree_hint_run "$test_home"
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"AI agent worktrees"*".codex/worktrees"* ]] || return 1
+    # Report only: the worktree must still exist afterwards.
+    [ -f "$test_home/.codex/worktrees/topic/repo/file" ]
+}
+
+@test "report_agent_worktree_candidates skips a row on a size timeout without cancelling clean" {
+    local test_home="$HOME/wt-timeout-home"
+    mkdir -p "$test_home/code/proj/.claude/worktrees/wt-one"
+
+    _worktree_hint_run "$test_home" 124
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"AI agent worktrees"* ]] || return 1
+    [[ "$output" == *"RC=0 CANCEL=none"* ]]
+}
+
+@test "report_agent_worktree_candidates keeps a size signal sticky" {
+    local test_home="$HOME/wt-signal-home"
+    mkdir -p "$test_home/code/proj/.claude/worktrees/wt-one"
+
+    _worktree_hint_run "$test_home" 130
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"AI agent worktrees"* ]] || return 1
+    [[ "$output" == *"RC=130 CANCEL=130"* ]]
+}
+
 _codex_version_plist() {
 	mkdir -p "$(dirname "$1")"
 	local bundle_id="${3:-com.openai.codex}"
@@ -3591,4 +3673,239 @@ EOF
         return 1
     }
     [[ "$output" == *"PROTECTION_SHAPE_OK"* ]]
+}
+
+@test "clean_tool_cache keeps ordinary owner failures quiet without claiming success" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+activities=0
+note_activity() { activities=$((activities + 1)); }
+DRY_RUN=false
+MOLE_CURRENT_COMMAND=clean
+MOLE_CLEAN_CANCEL_STATUS=0
+clean_tool_cache "ok cache" "" true
+clean_tool_cache "failing cache" "" false
+owner_timeout() { return 124; }
+clean_tool_cache "slow cache" "" owner_timeout
+printf 'ACTIVITIES=%s\n' "$activities"
+printf 'CANCEL=%s\n' "${MOLE_CLEAN_CANCEL_STATUS:-0}"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"ok cache"* ]] || return 1
+    [[ "$output" != *"failing cache"* ]] || return 1
+    [[ "$output" != *"slow cache"* ]] || return 1
+    [[ "$output" == *"ACTIVITIES=1"* ]] || return 1
+    [[ "$output" == *"CANCEL=0"* ]]
+}
+
+@test "an interrupted owner command stops the next pnpm store before its probe or prune" {
+    # Ctrl-C while `pnpm store prune` holds the terminal reaches only the
+    # child. Whichever store runs first is interrupted; the other one must
+    # not even be probed.
+    local test_home="$HOME/pnpm-cancel-home"
+    mkdir -p "$test_home/bin" "$test_home/.local/share/mise/installs/pnpm/10.34.5"
+    local bin
+    for bin in "$test_home/bin/pnpm" "$test_home/.local/share/mise/installs/pnpm/10.34.5/pnpm"; do
+        cat > "$bin" <<'SCRIPT'
+#!/bin/bash
+marker="$HOME/first-prune-interrupted"
+case "${1:-}" in
+    --version)
+        [[ -e "$marker" ]] && echo "SECOND-PROBE-RAN" >> "$HOME/trace"
+        echo "10.34.5"
+        exit 0
+        ;;
+    store)
+        if [[ "${2:-}" == "path" ]]; then
+            echo "$HOME/store-$(basename "$(dirname "$0")")"
+            exit 0
+        fi
+        if [[ "${2:-}" == "prune" ]]; then
+            if [[ -e "$marker" ]]; then
+                echo "SECOND-OWNER-RAN" >> "$HOME/trace"
+                exit 0
+            fi
+            touch "$marker"
+            exit 130
+        fi
+        ;;
+esac
+exit 2
+SCRIPT
+        chmod +x "$bin"
+    done
+
+    run env HOME="$test_home" PATH="$test_home/bin:/usr/bin:/bin" PROJECT_ROOT="$PROJECT_ROOT" \
+        MOLE_CURRENT_COMMAND=clean /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+run_with_timeout() { shift; "$@"; }
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+is_safe_pnpm_store_path() { [[ -n "$1" ]]; }
+export -f pgrep
+DRY_RUN=false
+rc=0
+clean_pnpm_stores || rc=$?
+printf 'RC=%s CANCEL=%s\n' "$rc" "${MOLE_CLEAN_CANCEL_STATUS:-none}"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [ -e "$test_home/first-prune-interrupted" ] || return 1
+    [[ "$output" == *"RC=130 CANCEL=130"* ]] || return 1
+    [ ! -e "$test_home/trace" ]
+}
+
+
+@test "pip and mise owner interruptions stop later developer cleanup" {
+    local tool code test_home
+    for tool in pip3 mise; do
+        for code in 130 143; do
+            test_home="$HOME/owner-$tool-$code"
+            mkdir -p "$test_home/bin"
+            cat > "$test_home/bin/$tool" <<'SCRIPT'
+#!/bin/bash
+case "$*" in
+    --version) echo test-version ;;
+    'cache dir' | 'cache path') echo "$HOME/cache" ;;
+    'cache purge' | 'cache clear') echo owner >> "$HOME/trace"; exit "$OWNER_RC" ;;
+    *) exit 2 ;;
+esac
+SCRIPT
+            chmod +x "$test_home/bin/$tool"
+            run env HOME="$test_home" PATH="$test_home/bin:/usr/bin:/bin"                 PROJECT_ROOT="$PROJECT_ROOT" TOOL="$tool" OWNER_RC="$code"                 MOLE_CURRENT_COMMAND=clean /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+run_with_timeout() { shift; "$@"; }
+is_path_whitelisted() { return 1; }
+note_activity() { :; }
+stop_section_spinner() { :; }
+safe_clean() { echo later-sink >> "$HOME/trace"; }
+clean_uv_cache() { :; }
+clean_pyinstaller_bincache() { :; }
+clean_conda_metadata_caches() { :; }
+clean_dev_npm() { :; }
+if [[ "$TOOL" == pip3 ]]; then
+    clean_dev_go() { echo later-section >> "$HOME/trace"; return 143; }
+else
+    clean_dev_python() { :; }
+    clean_dev_go() { :; }
+fi
+clean_dev_rust() { echo later-section >> "$HOME/trace"; return 143; }
+rc=0
+clean_developer_tools || rc=$?
+printf 'RC=%s CANCEL=%s\n' "$rc" "${MOLE_CLEAN_CANCEL_STATUS:-0}"
+EOF
+            [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+            [[ "$output" == *"RC=$code CANCEL=$code"* ]] || { echo "$tool: $output"; return 1; }
+            [[ "$(cat "$test_home/trace")" == owner ]] || { cat "$test_home/trace"; return 1; }
+        done
+    done
+}
+
+@test "clean_tool_cache honors pending cancellation before real and dry-run work" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+owner() { echo UNEXPECTED_OWNER; }
+is_path_whitelisted() { echo UNEXPECTED_WHITELIST; return 1; }
+for pending in 124 130; do
+    for DRY_RUN in false true; do
+        MOLE_CLEAN_CANCEL_STATUS="$pending"
+        rc=0
+        clean_tool_cache "pending cache" "$HOME/cache" owner || rc=$?
+        [[ "$rc" == "$pending" ]] || exit 1
+    done
+done
+echo PENDING_KEPT
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == PENDING_KEPT ]] || return 1
+}
+
+@test "mise owner failures never fall back to direct removal" {
+    local code test_home
+    for code in 0 1 124; do
+        test_home="$HOME/mise-owner-$code"
+        mkdir -p "$test_home/bin" "$test_home/cache"
+        printf keep > "$test_home/cache/blob"
+        cat > "$test_home/bin/mise" <<'SCRIPT'
+#!/bin/bash
+case "$*" in
+    'cache path') echo "$HOME/cache" ;;
+    'cache clear') echo owner > "$HOME/trace"; exit "$OWNER_RC" ;;
+    *) exit 2 ;;
+esac
+SCRIPT
+        chmod +x "$test_home/bin/mise"
+        run env HOME="$test_home" PATH="$test_home/bin:/usr/bin:/bin"             PROJECT_ROOT="$PROJECT_ROOT" OWNER_RC="$code" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+MOLE_CURRENT_COMMAND=clean
+MOLE_CLEAN_CANCEL_STATUS=0
+run_with_timeout() { shift; "$@"; }
+is_path_whitelisted() { return 1; }
+note_activity() { :; }
+safe_clean() { echo direct-removal >> "$HOME/trace"; }
+clean_dev_mise
+printf 'CANCEL=%s\n' "${MOLE_CLEAN_CANCEL_STATUS:-0}"
+EOF
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        [[ "$(cat "$test_home/trace")" == owner ]] || { cat "$test_home/trace"; return 1; }
+        [[ "$output" == *"CANCEL=0"* ]] || return 1
+    done
+}
+
+@test "Codex staging query timeout keeps the target without cancelling later cleanup (#1653)" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+_MOLE_COMPLETE_LSOF_MODE=direct
+_MOLE_CODEX_STAGING_ROOT="$HOME/Library/Caches/com.openai.codex/staging"
+mkdir -p "$_MOLE_CODEX_STAGING_ROOT"
+target="$_MOLE_CODEX_STAGING_ROOT/payload"
+printf 'keep' > "$target"
+_codex_staging_entry_is_still_stale() { return 0; }
+codex_desktop_process_state() { return 1; }
+codex_sparkle_updater_running() { return 1; }
+lsof() { return "$scripted_rc"; }
+run_with_timeout() { shift; "$@"; }
+MOLE_CURRENT_COMMAND=clean
+for scripted_rc in 124 130 143; do
+    MOLE_CLEAN_CANCEL_STATUS=0
+    probe_rc=0
+    codex_sparkle_staging_has_open_files "$_MOLE_CODEX_STAGING_ROOT" || probe_rc=$?
+    guard_rc=0
+    _codex_staging_delete_guard_allows || guard_rc=$?
+    [[ $guard_rc -ne 0 ]] || safe_remove "$target" true 1
+    next="$HOME/later-$scripted_rc.log"
+    printf 'later' > "$next"
+    next_rc=0
+    safe_remove "$next" true 1 || next_rc=$?
+    printf 'STATUS=%s PROBE=%s GUARD=%s CANCEL=%s NEXT=%s\n' "$scripted_rc" "$probe_rc" "$guard_rc" "$MOLE_CLEAN_CANCEL_STATUS" "$next_rc"
+    [[ -f "$target" ]] || exit 1
+    if [[ "$scripted_rc" == 124 ]]; then
+        [[ $probe_rc -eq 2 && $guard_rc -ne 0 && $MOLE_CLEAN_CANCEL_STATUS -eq 0 && $next_rc -eq 0 && ! -e "$next" ]] || exit 1
+    else
+        [[ $probe_rc -eq $scripted_rc && $guard_rc -ne 0 && $MOLE_CLEAN_CANCEL_STATUS -eq $scripted_rc && $next_rc -eq $scripted_rc && -f "$next" ]] || exit 1
+    fi
+done
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

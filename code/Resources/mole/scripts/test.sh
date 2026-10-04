@@ -249,7 +249,9 @@ if command -v bats > /dev/null 2>&1 && [ -d "tests" ]; then
         # --no-parallelize-within-files ensures each test file's tests run
         # sequentially (they share a $HOME set by setup_file and are not safe
         # to run concurrently). Parallelism is only across files.
-        bats_opts+=("--jobs" "$_jobs" "--no-parallelize-within-files")
+        if [[ $_jobs -gt 1 ]]; then
+            bats_opts+=("--jobs" "$_jobs" "--no-parallelize-within-files")
+        fi
         unset _ncpu _jobs
     fi
     if [[ "${MOLE_TEST_TIMING:-0}" == "1" ]]; then
@@ -266,7 +268,9 @@ if command -v bats > /dev/null 2>&1 && [ -d "tests" ]; then
     fi
 
     # Some test files include wall-clock timing assertions that are skewed by
-    # CPU contention from parallel test workers. When parallel mode is active,
+    # CPU contention from parallel test workers. Safety/optimize fixtures also
+    # use 1-2s subprocess budgets that must reach their mocked action first.
+    # When parallel mode is active,
     # split them out to run sequentially after the parallel batch completes.
     _sequential_files=()
     if [[ ${#bats_opts[@]} -gt 0 ]]; then
@@ -275,14 +279,14 @@ if command -v bats > /dev/null 2>&1 && [ -d "tests" ]; then
         if [[ ${#_all[@]} -eq 1 && -d "${_all[0]}" ]]; then
             while IFS= read -r _f; do
                 case "$_f" in
-                    *core_performance.bats | *regression.bats) _sequential_files+=("$_f") ;;
+                    *core_performance.bats | *regression.bats | *core_safe_functions.bats | *optimize.bats) _sequential_files+=("$_f") ;;
                     *) _rest+=("$_f") ;;
                 esac
             done < <(find "${_all[0]}" -type f -name '*.bats' | sort)
         else
             for _f in "${_all[@]}"; do
                 case "$_f" in
-                    *core_performance.bats | *regression.bats) _sequential_files+=("$_f") ;;
+                    *core_performance.bats | *regression.bats | *core_safe_functions.bats | *optimize.bats) _sequential_files+=("$_f") ;;
                     *) _rest+=("$_f") ;;
                 esac
             done

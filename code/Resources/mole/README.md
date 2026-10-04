@@ -252,6 +252,8 @@ Select a location to explore:
 
 `mo status` is a read-only dashboard for hardware, system pressure, disk activity, network traffic, power, and processes.
 
+When the IPv4 default route uses a tunnel, network graphs use that interface’s rates to avoid counting the same traffic again on its physical carrier. JSON retains per-interface rates, including the routed tunnel; idle non-default tunnels stay hidden.
+
 ```text
 $ mo status
 
@@ -326,6 +328,10 @@ reuse the latest successful sample with its original `process_collected_at` and 
 `process_stale: true`; a live process sample sets it to `false`. A count of `0` means Mole measured
 no zombies. Parent summaries contain at most three known owners;
 `zombie_parents_complete: false` means attribution was unavailable, incomplete, or truncated.
+
+If one collector fails, `mo status --json` still prints the metrics that were collected, reports the
+failure on stderr, and exits successfully, the same way `--watch` keeps streaming. It exits 1
+when none of CPU, memory, disk, or process metrics are available, or when JSON output fails.
 
 Status also supports read-only alerts for processes that stay above a CPU threshold. Use `--proc-cpu-threshold`, `--proc-cpu-window`, or `--proc-cpu-alerts=false` to tune or disable them.
 

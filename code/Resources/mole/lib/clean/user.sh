@@ -2,6 +2,10 @@
 # User Data Cleanup Module
 set -euo pipefail
 
+_mole_user_module_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1090
+source "$_mole_user_module_dir/purge_shared.sh"
+
 _user_process_delete_guard_allows() {
     mole_clean_process_guard "$_MOLE_USER_PROCESS_GUARD_PROBE" "$_MOLE_USER_PROCESS_GUARD_FAMILY started"
 }
@@ -325,15 +329,19 @@ _clean_mail_downloads() {
         mail_age_days=30
     fi
 
-    if pgrep -x "Mail" > /dev/null 2>&1; then
-        debug_log "Mail is running, skipping Mail Downloads cleanup"
-        return 0
-    fi
-
     local -a mail_dirs=(
         "$HOME/Library/Mail Downloads"
         "$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
     )
+    # Probe Mail only when there is something to clean, so an unknown process
+    # state never prints a stop line for a directory that does not exist.
+    [[ -d "${mail_dirs[0]}" || -d "${mail_dirs[1]}" ]] || return 0
+
+    local _MOLE_CLEAN_GUARD_REASON=""
+    if ! mole_clean_process_guard _mail_process_state "Mail started"; then
+        mole_report_guard_stop "Mail Downloads" debug_log "Mail is running, skipping Mail Downloads cleanup"
+        return 0
+    fi
     local count=0
     local cleaned_kb=0
     local spinner_active=false
@@ -589,7 +597,7 @@ _clean_chromium_old_versions() {
         else
             local line_color
             line_color=$(cleanup_result_color_kb "$total_size")
-            echo -e "  ${line_color}${ICON_SUCCESS}${NC} ${label} old versions${NC} · ${line_color}${cleaned_count} dirs, $size_human${NC}"
+            echo -e "  ${line_color}${ICON_SUCCESS}${NC} ${label} old versions${NC} · ${line_color}${cleaned_count} dirs, $(colorize_human_size "${size_human}")"
         fi
         mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
@@ -635,6 +643,26 @@ _google_drive_process_state() {
 
 _onedrive_process_state() {
     mole_pgrep_any -x "OneDrive"
+}
+
+_mail_process_state() {
+    mole_pgrep_any -x "Mail"
+}
+
+_arc_process_state() {
+    mole_pgrep_any -x "Arc"
+}
+
+_vivaldi_process_state() {
+    mole_pgrep_any -x "Vivaldi"
+}
+
+_qqbrowser_process_state() {
+    mole_pgrep_any -x "QQBrowser3"
+}
+
+_utm_process_state() {
+    mole_pgrep_any -x "UTM"
 }
 
 _clean_chrome_profile_caches_guarded() {
@@ -830,7 +858,7 @@ clean_edge_updater_old_versions() {
         else
             local line_color
             line_color=$(cleanup_result_color_kb "$total_size")
-            echo -e "  ${line_color}${ICON_SUCCESS}${NC} Edge updater old versions${NC} · ${line_color}${cleaned_count} dirs, $size_human${NC}"
+            echo -e "  ${line_color}${ICON_SUCCESS}${NC} Edge updater old versions${NC} · ${line_color}${cleaned_count} dirs, $(colorize_human_size "${size_human}")"
         fi
         mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
@@ -1044,7 +1072,7 @@ clean_app_caches() {
                 size_human=$(bytes_to_human "$((total_size * 1024))")
                 local line_color
                 line_color=$(cleanup_result_color_kb "$total_size")
-                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Sandboxed app caches${NC} · ${line_color}$size_human${NC}"
+                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Sandboxed app caches${NC} · $(colorize_human_size "${size_human}")"
             fi
         fi
         mole_add_cleaned_row "$cleaned_count" "$total_size"
@@ -1106,7 +1134,7 @@ clean_handoff_pasteboard_cache() {
     else
         local line_color
         line_color=$(cleanup_result_color_kb "$total_kb")
-        echo -e "  ${line_color}${ICON_SUCCESS}${NC} Handoff clipboard cache${NC} · ${line_color}$size_human${NC}"
+        echo -e "  ${line_color}${ICON_SUCCESS}${NC} Handoff clipboard cache${NC} · $(colorize_human_size "${size_human}")"
     fi
     mole_add_cleaned_row "$cleaned_count" "$total_kb"
     note_activity
@@ -1399,7 +1427,7 @@ clean_group_container_caches() {
                 size_human=$(bytes_to_human "$((total_size * 1024))")
                 local line_color
                 line_color=$(cleanup_result_color_kb "$total_size")
-                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Group Containers logs/caches${NC} · ${line_color}$size_human${NC}"
+                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Group Containers logs/caches${NC} · $(colorize_human_size "${size_human}")"
             fi
         fi
         mole_add_cleaned_row "$cleaned_count" "$total_size"
@@ -1669,7 +1697,7 @@ clean_external_volume_target() {
         else
             local line_color
             line_color=$(cleanup_result_color_kb "$total_size")
-            echo -e "  ${line_color}${ICON_SUCCESS}${NC} External volume cleanup${NC} · ${line_color}${volume_name}, $size_human${NC}"
+            echo -e "  ${line_color}${ICON_SUCCESS}${NC} External volume cleanup${NC} · ${line_color}${volume_name}, $(colorize_human_size "${size_human}")"
         fi
         mole_add_cleaned_row "$cleaned_count" "$total_size"
         note_activity
@@ -1680,6 +1708,8 @@ clean_external_volume_target() {
 
 # Browser caches (Safari/Chrome/Edge/Firefox).
 clean_browsers() {
+    # Refusal reason for the Arc, Brave, Vivaldi, and QQ Browser process guards.
+    local _MOLE_CLEAN_GUARD_REASON=""
     safe_clean ~/Library/Caches/com.apple.Safari/* "Safari cache"
     # Chrome/Chromium.
     safe_clean ~/Library/Caches/Google/Chrome/* "Chrome cache"
@@ -1731,9 +1761,7 @@ clean_browsers() {
     if [[ -d ~/Library/Application\ Support/Arc ]]; then
         safe_clean ~/Library/Caches/company.thebrowser.Browser/* "Arc cache"
         local _arc_profile
-        local _arc_running=false
-        pgrep -x "Arc" > /dev/null 2>&1 && _arc_running=true
-        if [[ "$_arc_running" != "true" ]]; then
+        if mole_clean_process_guard _arc_process_state "Arc started"; then
             safe_clean ~/Library/Application\ Support/Arc/*/Code\ Cache/* "Arc code cache"
             safe_clean ~/Library/Application\ Support/Arc/*/GPUCache/* "Arc GPU cache"
             safe_clean ~/Library/Application\ Support/Arc/*/DawnCache/* "Arc Dawn cache"
@@ -1754,6 +1782,8 @@ clean_browsers() {
             safe_clean ~/Library/Application\ Support/Arc/User\ Data/component_crx_cache/* "Arc component CRX cache"
             safe_clean ~/Library/Application\ Support/Arc/User\ Data/extensions_crx_cache/* "Arc extensions CRX cache"
             safe_clean ~/Library/Application\ Support/Arc/User\ Data/Crashpad/completed/* "Arc crash reports"
+        else
+            mole_report_guard_stop "Arc profile caches" debug_log "Arc is running, skipping Arc profile caches"
         fi
         for _arc_profile in "$HOME/Library/Application Support/Arc"/*/; do
             clean_service_worker_cache "Arc" "${_arc_profile%/}/Service Worker/CacheStorage"
@@ -1803,9 +1833,7 @@ clean_browsers() {
     if [[ -d ~/Library/Application\ Support/BraveSoftware ]]; then
         safe_clean ~/Library/Caches/BraveSoftware/Brave-Browser/* "Brave cache"
         local _brave_profile
-        local _brave_running=false
-        pgrep -x "Brave Browser" > /dev/null 2>&1 && _brave_running=true
-        if [[ "$_brave_running" != "true" ]]; then
+        if mole_clean_process_guard is_brave_browser_running "Brave started"; then
             safe_clean ~/Library/Application\ Support/BraveSoftware/Brave-Browser/*/Application\ Cache/* "Brave app cache"
             safe_clean ~/Library/Application\ Support/BraveSoftware/Brave-Browser/*/Code\ Cache/* "Brave code cache"
             safe_clean ~/Library/Application\ Support/BraveSoftware/Brave-Browser/*/GPUCache/* "Brave GPU cache"
@@ -1817,6 +1845,8 @@ clean_browsers() {
             safe_clean ~/Library/Application\ Support/BraveSoftware/Brave-Browser/GrShaderCache/* "Brave GR shader cache"
             safe_clean ~/Library/Application\ Support/BraveSoftware/Brave-Browser/GraphiteDawnCache/* "Brave Dawn cache"
             safe_clean ~/Library/Application\ Support/BraveSoftware/Brave-Browser/Crashpad/completed/* "Brave crash reports"
+        else
+            mole_report_guard_stop "Brave profile caches" debug_log "Brave is running, skipping Brave profile caches"
         fi
         for _brave_profile in "$HOME/Library/Application Support/BraveSoftware/Brave-Browser"/*/; do
             clean_service_worker_cache "Brave" "${_brave_profile%/}/Service Worker/CacheStorage"
@@ -1862,9 +1892,7 @@ clean_browsers() {
     if [[ -d ~/Library/Application\ Support/Vivaldi ]]; then
         safe_clean ~/Library/Caches/com.vivaldi.Vivaldi/* "Vivaldi cache"
         local _vivaldi_profile
-        local _vivaldi_running=false
-        pgrep -x "Vivaldi" > /dev/null 2>&1 && _vivaldi_running=true
-        if [[ "$_vivaldi_running" != "true" ]]; then
+        if mole_clean_process_guard _vivaldi_process_state "Vivaldi started"; then
             safe_clean ~/Library/Application\ Support/Vivaldi/*/Code\ Cache/* "Vivaldi code cache"
             safe_clean ~/Library/Application\ Support/Vivaldi/*/GPUCache/* "Vivaldi GPU cache"
             safe_clean ~/Library/Application\ Support/Vivaldi/*/DawnCache/* "Vivaldi Dawn cache"
@@ -1874,6 +1902,8 @@ clean_browsers() {
             safe_clean ~/Library/Application\ Support/Vivaldi/GrShaderCache/* "Vivaldi GR shader cache"
             safe_clean ~/Library/Application\ Support/Vivaldi/GraphiteDawnCache/* "Vivaldi Dawn cache"
             safe_clean ~/Library/Application\ Support/Vivaldi/Crashpad/completed/* "Vivaldi crash reports"
+        else
+            mole_report_guard_stop "Vivaldi profile caches" debug_log "Vivaldi is running, skipping Vivaldi profile caches"
         fi
         for _vivaldi_profile in "$HOME/Library/Application Support/Vivaldi"/*/; do
             clean_service_worker_cache "Vivaldi" "${_vivaldi_profile%/}/Service Worker/CacheStorage"
@@ -1889,9 +1919,7 @@ clean_browsers() {
     # QQ Browser 3 (Chromium-based).
     if [[ -d ~/Library/Application\ Support/QQBrowser3 ]]; then
         safe_clean ~/Library/Caches/com.tencent.QQBrowser3/* "QQ Browser cache"
-        local _qqbrowser_running=false
-        pgrep -x "QQBrowser3" > /dev/null 2>&1 && _qqbrowser_running=true
-        if [[ "$_qqbrowser_running" != "true" ]]; then
+        if mole_clean_process_guard _qqbrowser_process_state "QQ Browser started"; then
             safe_clean ~/Library/Application\ Support/QQBrowser3/*/Code\ Cache/* "QQ Browser code cache"
             safe_clean ~/Library/Application\ Support/QQBrowser3/*/GPUCache/* "QQ Browser GPU cache"
             safe_clean ~/Library/Application\ Support/QQBrowser3/ShaderCache/* "QQ Browser shader cache"
@@ -1899,6 +1927,8 @@ clean_browsers() {
             safe_clean ~/Library/Application\ Support/QQBrowser3/GraphiteDawnCache/* "QQ Browser Dawn cache"
             safe_clean ~/Library/Application\ Support/QQBrowser3/component_crx_cache/* "QQ Browser component cache"
             safe_clean ~/Library/Application\ Support/QQBrowser3/Crashpad/completed/* "QQ Browser crash reports"
+        else
+            mole_report_guard_stop "QQ Browser profile caches" debug_log "QQ Browser is running, skipping QQ Browser profile caches"
         fi
     fi
 }
@@ -1995,8 +2025,14 @@ clean_office_applications() {
 # Virtualization caches.
 clean_utm_caches() {
     local _MOLE_CONTAINER_CACHE_PROBE_DEADLINE=""
-    if pgrep -x "UTM" > /dev/null 2>&1; then
-        debug_log "Skipping UTM caches while UTM is running"
+    # Same reason as Mail Downloads: no UTM targets, no process question.
+    mole_cleanup_targets_exist \
+        "$HOME/Library/Caches/com.utmapp.UTM"/* \
+        "$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Caches"/* \
+        "$HOME/Library/Containers/com.utmapp.UTM/Data/tmp"/* || return 0
+    local _MOLE_CLEAN_GUARD_REASON=""
+    if ! mole_clean_process_guard _utm_process_state "UTM started"; then
+        mole_report_guard_stop "UTM caches" debug_log "Skipping UTM caches while UTM is running"
         return 0
     fi
 
@@ -2460,9 +2496,9 @@ clean_application_support_logs() {
             local line_color
             line_color=$(cleanup_result_color_kb "$total_size_kb")
             if [[ "$total_size_partial" == "true" ]]; then
-                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Application Support logs/caches${NC} · ${line_color}at least $size_human${NC}"
+                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Application Support logs/caches${NC} · ${line_color}at least $(colorize_human_size "${size_human}")"
             else
-                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Application Support logs/caches${NC} · ${line_color}$size_human${NC}"
+                echo -e "  ${line_color}${ICON_SUCCESS}${NC} Application Support logs/caches${NC} · $(colorize_human_size "${size_human}")"
             fi
         fi
         mole_add_cleaned_row "$cleaned_count" "$total_size_kb"
@@ -2547,7 +2583,7 @@ clean_cached_device_firmware() {
         else
             local line_color
             line_color=$(cleanup_result_color_kb "$total_size_kb")
-            echo -e "  ${line_color}${ICON_SUCCESS}${NC} Cached device firmware${NC} · ${line_color}${cleaned_count} files, $size_human${NC}"
+            echo -e "  ${line_color}${ICON_SUCCESS}${NC} Cached device firmware${NC} · ${line_color}${cleaned_count} files, $(colorize_human_size "${size_human}")"
         fi
         mole_add_cleaned_row "$cleaned_count" "$total_size_kb"
         note_activity
@@ -2583,9 +2619,9 @@ jetbrains_stale_version_dirs() {
         '
 }
 
-# AI coding agents (Claude Code and similar) create full checkouts under
-# <project>/.claude/worktrees/ that accumulate silently across repos. Report
-# only, same 1GB bar as other large candidates; removal stays a manual
+# AI coding agents create full checkouts that accumulate silently: Claude Code
+# under <project>/.claude/worktrees/, the Codex app under ~/.codex/worktrees/.
+# Report only, same 1GB bar as other large candidates; removal stays a manual
 # `git worktree remove` decision because a worktree may hold agent work.
 report_agent_worktree_candidates() {
     local threshold_kb=$((1024 * 1024)) # 1GB
@@ -2594,21 +2630,73 @@ report_agent_worktree_candidates() {
         "$HOME/GitHub" "$HOME/Workspace" "$HOME/Repos"
         "$HOME/Development" "$HOME/www" "$HOME/src"
     )
-    local root container size_kb size_rc
+
+    _report_agent_worktree_container() {
+        local container="$1"
+        local size_kb size_rc=0
+        size_kb=$(get_path_size_kb "$container" 2> /dev/null) || size_rc=$?
+        # Review rows never cancel the rest of clean on a size timeout (#1576):
+        # a container holding many full checkouts can outlast the size budget.
+        # Signals still stop the run so Ctrl-C stays sticky.
+        if [[ $size_rc -ge 128 ]]; then
+            _mole_record_clean_cancellation "$size_rc"
+            return "$size_rc"
+        fi
+        [[ $size_rc -eq 0 ]] || return 0
+        [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
+        [[ "$size_kb" -ge "$threshold_kb" ]] || return 0
+        # The caller's "Scanning large files..." spinner is still running;
+        # printing over it glues the row onto the spinner frame.
+        stop_section_spinner
+        echo -e "  ${YELLOW}${ICON_REVIEW}${NC} AI agent worktrees · ${GREEN}$(bytes_to_human "$((size_kb * 1024))")${NC} · ${GRAY}$(format_path_link "$container")${NC}"
+        note_activity
+        start_section_spinner "Scanning large files..."
+    }
+
+    local container rc=0
+    # The Codex app keeps every worktree under one fixed container outside
+    # any project root, so the find below never reaches it.
+    container="$HOME/.codex/worktrees"
+    if [[ -d "$container" && ! -L "$container" ]]; then
+        _report_agent_worktree_container "$container" || rc=$?
+    fi
+
+    # ~/code and ~/Code are one directory on case-insensitive APFS, and a root
+    # may be a symlink to another. Scan each physical root once, or every
+    # container is reported twice (same class as #590 and #1416). A root can
+    # also sit inside another one, so containers are deduplicated as well.
+    local -a scanned_roots=() reported_containers=()
+    local root physical_root scanned already_scanned
     for root in "${roots[@]}"; do
+        [[ $rc -eq 0 ]] || break
         [[ -d "$root" ]] || continue
+        physical_root=$(mole_purge_resolve_path_case "$root")
+        already_scanned=false
+        for scanned in "${scanned_roots[@]+"${scanned_roots[@]}"}"; do
+            if [[ "$scanned" == "$physical_root" ]]; then
+                already_scanned=true
+                break
+            fi
+        done
+        [[ "$already_scanned" == "false" ]] || continue
+        scanned_roots+=("$physical_root")
         while IFS= read -r -d '' container; do
-            size_rc=0
-            size_kb=$(get_path_size_kb "$container" 2> /dev/null) || size_rc=$?
-            [[ $size_rc -eq 0 ]] || _mole_record_clean_cancellation "$size_rc"
-            [[ $size_rc -eq 0 ]] || return "$size_rc"
-            [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
-            [[ "$size_kb" -ge "$threshold_kb" ]] || continue
-            echo -e "  ${YELLOW}${ICON_REVIEW}${NC} AI agent worktrees · ${GREEN}$(bytes_to_human "$((size_kb * 1024))")${NC} · ${GRAY}$(format_path_link "$container")${NC}"
-            note_activity
-        done < <(run_with_timeout "$MOLE_TIMEOUT_PKG_CLEANUP_SEC" command find "$root" -maxdepth 6 -type d -path "*/.claude/worktrees" -prune -print0 2> /dev/null)
+            already_scanned=false
+            for scanned in "${reported_containers[@]+"${reported_containers[@]}"}"; do
+                if [[ "$scanned" == "$container" ]]; then
+                    already_scanned=true
+                    break
+                fi
+            done
+            [[ "$already_scanned" == "false" ]] || continue
+            reported_containers+=("$container")
+            _report_agent_worktree_container "$container" || rc=$?
+            [[ $rc -eq 0 ]] || break
+        done < <(run_with_timeout "$MOLE_TIMEOUT_PKG_CLEANUP_SEC" command find "$physical_root" -maxdepth 6 -type d -path "*/.claude/worktrees" -prune -print0 2> /dev/null)
     done
-    return 0
+
+    unset -f _report_agent_worktree_container
+    return "$rc"
 }
 
 # One `docker system df` row for the Large files Docker line. Docker's
@@ -2849,7 +2937,7 @@ check_large_file_candidates() {
 
     # Emulator images, SDK system images, downloaded models, and installed
     # runtimes are user-chosen payloads, not caches. Size is shown so the
-    # owner tool (Device Manager, SDK Manager, huggingface-cli, mise) can
+    # owner tool (Device Manager, SDK Manager, huggingface-cli, mise, fvm) can
     # remove what is unused; Mole never deletes them.
     local android_avd_root="$HOME/.android/avd"
     [[ "${ANDROID_AVD_HOME:-}" == /* ]] && android_avd_root="$ANDROID_AVD_HOME"
@@ -2871,6 +2959,11 @@ check_large_file_candidates() {
         [[ -d "$mise_tool_dir" && ! -L "$mise_tool_dir" ]] || continue
         _report_large_or_stop "mise ${mise_tool_dir##*/} installs" "$mise_tool_dir" || return $?
     done
+    # FVM keeps one full Flutter SDK per installed version; `fvm list` shows
+    # which ones projects still pin and `fvm remove` owns removal.
+    local fvm_versions="$HOME/fvm/versions"
+    [[ "${FVM_CACHE_PATH:-}" == /* ]] && fvm_versions="$FVM_CACHE_PATH/versions"
+    _report_large_or_stop "FVM Flutter SDKs" "$fvm_versions" || return $?
 
     # JetBrains keeps one data dir per IDE version (GoLand2025.1, ...). After
     # an upgrade the previous version's dir lingers forever with plugins and

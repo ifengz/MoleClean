@@ -9,7 +9,7 @@ setup_file() {
     MOLE_TEST_MODE=1
     export MOLE_TEST_MODE
 
-    # Two tests below run the real pipeline (MOLE_TEST_MODE=0), which otherwise
+    # Full-pipeline tests below run the real pipeline (MOLE_TEST_MODE=0), which otherwise
     # scans the host: a full lsregister -dump. That cost seconds per test and
     # scaled with whatever LaunchServices happened to hold, which made this
     # file the critical path of the whole CI suite. The scan feeds no
@@ -73,7 +73,7 @@ run_clean_dry_run() {
         "$PROJECT_ROOT/mole" clean --dry-run
 }
 
-# Stub the two host toolchains the real pipeline shells out to, so what these
+# Stub the host toolchains the real pipeline shells out to, so what these
 # tests measure does not depend on the machine's Homebrew or Xcode. brew is
 # required to be mocked by project policy: no verification run may reach a real
 # package manager. xcrun follows for the same reason, and returning non-zero is
@@ -99,6 +99,16 @@ esac
 exit 0
 MOCK
 
+    cat > "$MOCK_TOOLCHAIN_BIN/go" << 'MOCK'
+#!/bin/bash
+# Shim: resolve empty fixture caches without downloading a host toolchain.
+case "$*" in
+    'env GOMODCACHE') printf '%s\n' "$HOME/go/pkg/mod" ;;
+    'env GOCACHE') printf '%s\n' "$HOME/Library/Caches/go-build" ;;
+    *) printf 'Unexpected Go command in clean fixture: %s\n' "$*" >&2; exit 99 ;;
+esac
+MOCK
+
     cat > "$MOCK_TOOLCHAIN_BIN/xcrun" << 'MOCK'
 #!/bin/bash
 # Shim: no simulator toolchain, which is the CLT-only shape clean handles.
@@ -120,7 +130,7 @@ MOCK
 printf '  PID  PPID COMM ARGS\n'
 MOCK
 
-    chmod +x "$MOCK_TOOLCHAIN_BIN/brew" "$MOCK_TOOLCHAIN_BIN/xcrun" \
+    chmod +x "$MOCK_TOOLCHAIN_BIN/brew" "$MOCK_TOOLCHAIN_BIN/go" "$MOCK_TOOLCHAIN_BIN/xcrun" \
         "$MOCK_TOOLCHAIN_BIN/lsof" "$MOCK_TOOLCHAIN_BIN/ps"
 }
 
@@ -159,6 +169,38 @@ EOF
     [[ ! -e "$base/a" ]] || return 1
     [[ ! -e "$base/b" ]] || return 1
     [[ -e "$base/keep" ]] || return 1
+
+    rm -rf "$base"
+}
+
+@test "safe_clean colors a real cleanup size by unit like the dry-run preview" {
+    local base="$HOME/safe_clean_color"
+    mkdir -p "$base"
+    /bin/dd if=/dev/zero of="$base/blob" bs=1024 count=2048 2> /dev/null
+
+    run env -u NO_COLOR HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 /bin/bash --noprofile --norc << EOF
+set -euo pipefail
+source "\$PROJECT_ROOT/lib/core/common.sh"
+source "\$PROJECT_ROOT/bin/clean.sh"
+DRY_RUN=false
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+note_activity() { :; }
+safe_remove() { /bin/rm -rf "\$1"; return 0; }
+safe_clean "$base/blob" "Test cache"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    # The success icon stays green; only the size takes its unit color.
+    [[ "$output" == *$'\033[0;32m✓\033[0m Test cache'* ]] || return 1
+    local yellow_mb=$'\033\\[0;33m[0-9.]+MB\033\\[0m'
+    [[ "$output" =~ $yellow_mb ]] || return 1
+    [[ ! -e "$base/blob" ]] || return 1
 
     rm -rf "$base"
 }
@@ -2039,6 +2081,70 @@ EOF
     [ -z "$open_coded" ] || {
         echo "these guards translate the process state themselves instead of calling mole_clean_process_guard:"
         echo "$open_coded"
+        return 1
+    }
+
+    # The same fold without a named guard: `pgrep -x App && running=true` or
+    # `if pgrep ...; then skip; fi` reads a pgrep error (exit 2/3, or no pgrep
+    # at all) as "not running" and cleans a live app's caches. A raw pgrep in
+    # cleanup code must capture its own status, either `|| rc=$?` or an
+    # `else` whose first line is `rc=$?`; anything else goes through
+    # mole_pgrep_any and mole_clean_process_guard.
+    local raw_pgrep
+    raw_pgrep=$(
+        command awk '
+            FNR == 1 { cont = 0; in_if = 0; want_capture = 0 }
+            /^[ \t]*#/ { next }
+            cont {
+                buf = buf " " $0
+                if ($0 ~ /\\[ \t]*$/) next
+                cont = 0
+                if (buf !~ /\|\|[ \t]*[A-Za-z_][A-Za-z0-9_]*=\$\?/) print FILENAME ":" start ": " first
+                next
+            }
+            want_capture {
+                want_capture = 0
+                if ($0 !~ /^[ \t]*[A-Za-z_][A-Za-z0-9_]*=\$\?/) print FILENAME ":" start ": " first
+                next
+            }
+            in_if {
+                if ($0 ~ /^[ \t]*if[ \t]/) depth++
+                else if ($0 ~ /^[ \t]*fi([ \t;]|$)/) {
+                    depth--
+                    if (depth == 0) { in_if = 0; print FILENAME ":" start ": " first }
+                } else if (depth == 1 && $0 ~ /^[ \t]*elif[ \t]/) { in_if = 0; print FILENAME ":" start ": " first }
+                else if (depth == 1 && $0 ~ /^[ \t]*else[ \t]*$/) { in_if = 0; want_capture = 1 }
+                next
+            }
+            {
+                line = $0
+                gsub(/command -v pgrep/, "", line)
+                if (line !~ /(^|[^A-Za-z0-9_])pgrep[ \t]/) next
+                seen++
+                start = FNR
+                first = $0
+                if (line ~ /\\[ \t]*$/) { cont = 1; buf = line; next }
+                if (line ~ /\|\|[ \t]*[A-Za-z_][A-Za-z0-9_]*=\$\?/) next
+                if (line ~ /^[ \t]*if[ \t]+pgrep[ \t].*;[ \t]*then[ \t]*$/) { in_if = 1; depth = 1; next }
+                print FILENAME ":" FNR ": " $0
+            }
+            END { print "RAW_PGREP_SITES=" seen + 0 }
+        ' "$PROJECT_ROOT"/lib/clean/*.sh "$PROJECT_ROOT"/lib/optimize/*.sh
+    )
+    local raw_sites
+    raw_sites=$(printf '%s\n' "$raw_pgrep" | command sed -n 's/^RAW_PGREP_SITES=//p')
+    # Zero raw sites means the scan went blind (renamed files, a broken
+    # pattern), not that the tree is clean: the status-capturing probes in
+    # dev.sh, app_caches.sh, and optimize/tasks.sh must be seen.
+    [[ "$raw_sites" =~ ^[0-9]+$ && "$raw_sites" -gt 0 ]] || {
+        echo "raw pgrep scan matched no code lines; fix the scan before trusting it"
+        return 1
+    }
+    local folded
+    folded=$(printf '%s\n' "$raw_pgrep" | command grep -v '^RAW_PGREP_SITES=' || true)
+    [ -z "$folded" ] || {
+        echo "these pgrep calls fold a probe error into \"not running\"; use mole_pgrep_any with mole_clean_process_guard:"
+        echo "$folded"
         return 1
     }
 }
