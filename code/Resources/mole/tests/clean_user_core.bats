@@ -1411,11 +1411,16 @@ EOF
 }
 
 @test "explicit App Container cleanup families expose one cumulative probe deadline (#1471)" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+    local fixture_home="$HOME/container-probe-deadline"
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/app_caches.sh"
 source "$PROJECT_ROOT/lib/clean/user.sh"
+pgrep() {
+    printf '%s\n' "$*" >> "$HOME/process-trace"
+    return 1
+}
 start_section_spinner() { :; }
 stop_section_spinner() { :; }
 note_activity() { :; }
@@ -1449,9 +1454,9 @@ echo x > "$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Caches/blob"
 clean_app_caches
 clean_office_applications
 clean_utm_caches
+grep -qxF -- '-x UTM' "$HOME/process-trace" || exit 1
 EOF
 
-    rm -rf "$HOME/Library/Containers/com.utmapp.UTM"
     [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"SCOPED=Wallpaper agent cache"* ]] || return 1
     [[ "$output" == *"SCOPED=Microsoft Word container cache"* ]] || return 1
@@ -1823,10 +1828,17 @@ EOF
 }
 
 @test "clean_browsers calls expected cache paths" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true /bin/bash --noprofile --norc << 'EOF'
+    local fixture_home="$HOME/browser-cache-paths"
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
+mkdir -p "$HOME/Library/Caches/Firefox"
+touch "$HOME/Library/Caches/Firefox/candidate"
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/user.sh"
+pgrep() {
+    printf '%s\n' "$*" >> "$HOME/process-trace"
+    return 1
+}
 safe_clean() { echo "$2"; }
 clean_service_worker_cache() { :; }
 note_activity() { :; }
@@ -1834,9 +1846,10 @@ files_cleaned=0
 total_size_cleaned=0
 total_items=0
 clean_browsers
+grep -qxF -- '-x Firefox' "$HOME/process-trace" || exit 1
 EOF
 
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ] || return 1
     [[ "$output" == *"Safari cache"* ]] || return 1
     [[ "$output" == *"Firefox cache"* ]] || return 1
     [[ "$output" == *"Puppeteer browser cache"* ]]
@@ -2667,6 +2680,8 @@ run_with_timeout() {
     shift
     "$@"
 }
+
+
 check_large_file_candidates
 EOF
 
@@ -2692,6 +2707,217 @@ EOF
         [ -d "$review_home/.cache/huggingface/hub" ] &&
         [ -d "$review_home/.local/share/mise/installs/node/22.1.0" ] &&
         [ -d "$review_home/.gradle/caches/modules-2" ]
+}
+
+@test "large files reports large E5RT caches without deleting or following links (#1631)" {
+    local review_home
+    review_home=$(mktemp -d "$HOME/e5rt-review.XXXXXX")
+    mkdir -p "$review_home/Library/Caches/python/com.apple.e5rt.e5bundlecache" \
+        "$review_home/Library/Caches/small/com.apple.e5rt.e5bundlecache" \
+        "$review_home/elsewhere/com.apple.e5rt.e5bundlecache"
+    ln -s "$review_home/elsewhere" "$review_home/Library/Caches/linked-owner"
+    ln -s "$review_home/elsewhere/com.apple.e5rt.e5bundlecache" "$review_home/Library/Caches/python/linked-cache"
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+defaults() { return 1; }
+docker() { return 1; }
+safe_clean() { printf 'UNEXPECTED_DELETE\n'; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == du ]]; then
+        case "${!#}" in
+            */small/*) printf '16\t%s\n' "${!#}" ;;
+            *) printf '75497472\t%s\n' "${!#}" ;;
+        esac
+    else
+        "$@"
+    fi
+}
+check_large_file_candidates
+holds_compiled_model_cache "$HOME/Library/Caches/python" || exit 1
+holds_compiled_model_cache "$HOME/Library/Caches/python/com.apple.e5rt.e5bundlecache" || exit 1
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Compiled model cache (python)"* ]] || return 1
+    [[ "$output" != *"Compiled model cache (small)"* ]] || return 1
+    [[ "$output" != *"linked-owner"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_DELETE"* ]] || return 1
+    [ -d "$review_home/Library/Caches/python/com.apple.e5rt.e5bundlecache" ]
+}
+
+@test "large files discards partial E5RT measurements and continues later review (#1631)" {
+    local review_home
+    review_home=$(mktemp -d "$HOME/e5rt-timeout.XXXXXX")
+    mkdir -p "$review_home/Library/Caches/python/com.apple.e5rt.e5bundlecache" "$review_home/.android/avd"
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+defaults() { return 1; }
+docker() { return 1; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == du ]]; then
+        printf '75497472\t%s\n' "${!#}"
+        if [[ "${!#}" == */com.apple.e5rt.e5bundlecache ]]; then
+            printf 'MEASURED_E5RT\n' >&3
+            return 124
+        fi
+        return 0
+    fi
+    "$@"
+}
+check_large_file_candidates 3> "$HOME/measurement.trace"
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(cat "$review_home/measurement.trace")" = MEASURED_E5RT ] || return 1
+    [[ "$output" != *"Compiled model cache"* ]] || return 1
+    [[ "$output" == *"Android emulators"* ]]
+}
+
+@test "large files keeps a du total that skipped unreadable entries" {
+    local review_home
+    review_home=$(mktemp -d "$HOME/du-partial.XXXXXX")
+    mkdir -p "$review_home/Library/Developer/CoreSimulator/Devices"
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+defaults() { return 1; }
+docker() { return 1; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == du ]]; then
+        # BSD du prints the readable total and exits 1 for an unreadable entry.
+        printf '12000000\t%s\n' "${!#}"
+        return 1
+    fi
+    "$@"
+}
+check_large_file_candidates
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Simulator data"* ]]
+}
+
+@test "large files skips an E5RT total that missed unreadable entries (#1631)" {
+    local review_home
+    review_home=$(mktemp -d "$HOME/e5rt-partial.XXXXXX")
+    mkdir -p "$review_home/Library/Caches/python/com.apple.e5rt.e5bundlecache" \
+        "$review_home/Library/Developer/CoreSimulator/Devices"
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+defaults() { return 1; }
+docker() { return 1; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == du ]]; then
+        # BSD du prints the readable total and exits 1 for an unreadable entry.
+        printf '12000000\t%s\n' "${!#}"
+        return 1
+    fi
+    "$@"
+}
+check_large_file_candidates
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Compiled model cache"* ]] || return 1
+    [[ "$output" == *"Simulator data"* ]]
+}
+
+@test "large files continues later rows when the E5RT listing has no scratch file" {
+    local review_home
+    review_home=$(mktemp -d "$HOME/e5rt-scratch.XXXXXX")
+    mkdir -p "$review_home/Library/Caches/python/com.apple.e5rt.e5bundlecache" "$review_home/.android/avd"
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { echo "ACTIVITY"; }
+defaults() { return 1; }
+docker() { return 1; }
+create_temp_file() { return 1; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == du ]]; then
+        printf '75497472\t%s\n' "${!#}"
+        return 0
+    fi
+    "$@"
+}
+check_large_file_candidates
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"Compiled model cache"* ]] || return 1
+    [[ "$output" == *"Android emulators"* ]] || return 1
+    [[ "$output" == *"ACTIVITY"* ]]
+}
+
+@test "large files discards incomplete E5RT discovery and propagates measurement signals (#1631)" {
+    local review_home
+    review_home=$(mktemp -d "$HOME/e5rt-errors.XXXXXX")
+    mkdir -p "$review_home/Library/Caches/python/com.apple.e5rt.e5bundlecache" "$review_home/.android/avd"
+    local mode
+    for mode in listing_failure measurement_signal spent_budget; do
+        run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" CASE_MODE="$mode" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+defaults() { return 1; }
+docker() { return 1; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == find && "$2" == "$HOME/Library/Caches" ]]; then
+        printf 'LISTING\n' >&3
+        printf '%s\0' "$HOME/Library/Caches/python/com.apple.e5rt.e5bundlecache"
+        if [[ "$CASE_MODE" == listing_failure ]]; then return 1; fi
+        if [[ "$CASE_MODE" == spent_budget ]]; then SECONDS=$((SECONDS + MOLE_TIMEOUT_HINT_SCAN_SEC)); fi
+        return 0
+    fi
+    if [[ "$1" == du ]]; then
+        if [[ "${!#}" == */com.apple.e5rt.e5bundlecache ]]; then
+            printf 'MEASURED\n' >&3
+            return 130
+        fi
+        printf '2097152\t%s\n' "${!#}"
+        return 0
+    fi
+    "$@"
+}
+check_large_file_candidates 3> "$HOME/$CASE_MODE.trace"
+EOF
+        if [[ "$mode" == measurement_signal ]]; then
+            [ "$status" -eq 130 ] || { echo "$output"; return 1; }
+            [ "$(cat "$review_home/$mode.trace")" = $'LISTING\nMEASURED' ] || return 1
+            [[ "$output" != *"Android emulators"* ]] || return 1
+        else
+            [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+            [ "$(cat "$review_home/$mode.trace")" = LISTING ] || return 1
+            [[ "$output" == *"Android emulators"* ]] || return 1
+        fi
+        [[ "$output" != *"Compiled model cache"* ]] || return 1
+    done
 }
 
 @test "large files reviews installed FVM Flutter SDKs without deleting" {
@@ -2758,6 +2984,34 @@ EOF
     # Report only: both SDK folders must still exist afterwards.
     [ -d "$review_home/fvm/versions/3.47.5" ] &&
         [ -d "$review_home/custom-fvm/versions/3.44.0" ]
+}
+
+@test "large files links the full path behind a two-segment label" {
+    local review_home="$HOME/large-review-short-path"
+    mkdir -p "$review_home/Library/Application Support/MobileSync/Backup/00008150-DEVICE" "$review_home/.gradle/caches"
+
+    run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+format_path_link() { printf 'LINK<%s>TEXT<%s>' "$1" "${2:-}"; }
+du() { printf '2097152 %s\n' "${2:-/tmp}"; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+check_large_file_candidates
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"LINK<$review_home/Library/Application Support/MobileSync/Backup>TEXT<…/MobileSync/Backup>"* ]] || { echo "$output"; return 1; }
+    # A path that is already short keeps its full form.
+    [[ "$output" == *"TEXT<~/.gradle/caches>"* ]] || { echo "$output"; return 1; }
 }
 
 @test "large files dates the irreplaceable rows and leaves caches undated" {

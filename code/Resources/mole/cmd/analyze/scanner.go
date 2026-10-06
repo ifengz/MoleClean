@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 var spotlightQueryRunner = func(ctx context.Context, root, query string) ([]byte, error) {
@@ -228,6 +229,14 @@ func acquireScanPermit(ctx context.Context, sem chan struct{}) error {
 	}
 }
 
+func getDirectorySizeFromDuWithLimiter(ctx context.Context, path string, limiter *scanLimiter) (int64, error) {
+	if err := acquireScanPermit(ctx, limiter.duSem); err != nil {
+		return 0, err
+	}
+	defer func() { <-limiter.duSem }()
+	return getDirectorySizeFromDu(ctx, path)
+}
+
 func scanPathConcurrent(ctx context.Context, root string, filesScanned, dirsScanned, bytesScanned *int64, currentPath *atomic.Value) (scanResult, error) {
 	return scanPathConcurrentWithOptions(ctx, root, filesScanned, dirsScanned, bytesScanned, currentPath, true, maxEntries)
 }
@@ -299,7 +308,6 @@ func scanPathConcurrentWithLimiter(ctx context.Context, root string, filesScanne
 	heap.Init(largeFilesHeap)
 	largeFileMinSize := int64(largeFileWarmupMinSize)
 
-	duSem := limiter.duSem
 	duQueueSem := limiter.duQueueSem
 	var wg sync.WaitGroup
 
@@ -449,13 +457,7 @@ scanChildren:
 						return
 					}
 
-					size, err := func() (int64, error) {
-						if err := acquireScanPermit(ctx, duSem); err != nil {
-							return 0, err
-						}
-						defer func() { <-duSem }()
-						return getDirectorySizeFromDu(ctx, fullPath)
-					}()
+					size, err := getDirectorySizeFromDuWithLimiter(ctx, fullPath, limiter)
 					if ctx.Err() != nil {
 						return
 					}
@@ -949,6 +951,43 @@ func getDirectorySizeFromDuWithExclude(ctx context.Context, path string, exclude
 	return getDirectorySizeFromDuWithExcludeAndIgnores(ctx, path, excludePath, nil)
 }
 
+// duError keeps a short diagnostic separate from paths and the process status.
+// Unwrap preserves cancellation, permission and exit-status classification.
+type duError struct {
+	cause  error
+	reason string
+}
+
+func (e *duError) Error() string {
+	if e.reason == "" {
+		return e.cause.Error()
+	}
+	return fmt.Sprintf("%v: %s", e.cause, e.reason)
+}
+
+func (e *duError) Unwrap() error { return e.cause }
+
+func duDiagnosticReason(stderr []byte) string {
+	for line := range strings.Lines(string(stderr)) {
+		// BSD du prints "du: <path>: <strerror>". The last separator
+		// avoids copying a path that itself contains colons and spaces.
+		separator := strings.LastIndex(line, ": ")
+		if !strings.HasPrefix(line, "du: ") || separator <= len("du") {
+			continue
+		}
+		reason := strings.TrimSpace(strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) || unicode.IsSpace(r) {
+				return ' '
+			}
+			return r
+		}, line[separator+2:]))
+		if reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
 func getDirectorySizeFromDuWithExcludeAndIgnores(ctx context.Context, path string, excludePath string, ignoreNames []string) (int64, error) {
 	// Validate paths.
 	if err := validatePath(path); err != nil {
@@ -991,6 +1030,9 @@ func getDirectorySizeFromDuWithExcludeAndIgnores(ctx context.Context, path strin
 			// du exits 1 for any unreadable descendant; its stderr is the
 			// only place that says whether every failure was a denial.
 			runErr = fmt.Errorf("%w: %w", runErr, fs.ErrPermission)
+		}
+		if runErr != nil && ctx.Err() == nil {
+			runErr = &duError{cause: runErr, reason: duDiagnosticReason(stderr.Bytes())}
 		}
 		if len(fields) == 0 {
 			if runErr != nil {

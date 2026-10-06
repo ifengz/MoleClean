@@ -2879,37 +2879,114 @@ clean_dev_jvm() {
     # Maven used to be cleaned here and relied on DEFAULT_WHITELIST_PATTERNS to
     # stay safe, which stops applying as soon as a user saves any whitelist
     # entry of their own, so the delete path is gone rather than guarded.
-    if mole_cleanup_targets_exist \
-        "$HOME/.gradle/caches/build-cache-"*/* \
-        "$HOME/.gradle/notifications"/* \
-        "$HOME/.gradle/daemon"/* \
-        "$HOME/.gradle/workers"/*; then
+    local gradle_root="$HOME/.gradle"
+    [[ -d "$gradle_root" && ! -L "$gradle_root" ]] || return 0
+    local scan_dir scan_rc=0 scan_start
+    scan_dir=$(create_temp_dir) || return 0
+    local scan_deadline=$((SECONDS + MOLE_TIMEOUT_HINT_SCAN_SEC))
+    debug_log "Starting Gradle candidate listing"
+    debug_timer_start scan_start
+    start_section_spinner "Scanning Gradle caches..."
+    # Shell globs expand before a function can show progress or enforce a
+    # deadline. Materialize this narrow listing in one bounded worker instead;
+    # a partial result never reaches a guard, preview, or deletion boundary.
+    # The build cache lists last: it can hold thousands of entries, so it is the
+    # only group that may spend the filtering budget below.
+    # shellcheck disable=SC2016 # Positional arguments expand inside the worker.
+    run_with_timeout "$MOLE_TIMEOUT_HINT_SCAN_SEC" /bin/bash --noprofile --norc -c '
+        set -euo pipefail
+        root="$1"; scratch="$2"
+        for name in notifications daemon workers; do
+            if [[ -d "$root/$name" && ! -L "$root/$name" ]]; then
+                find "$root/$name" -mindepth 1 -maxdepth 1 ! -name ".*" -print0
+            fi
+        done
+        if [[ -d "$root/caches" && ! -L "$root/caches" ]]; then
+            find "$root/caches" -mindepth 1 -maxdepth 1 -type d -name "build-cache-*" -print0 > "$scratch/roots"
+            while IFS= read -r -d "" cache; do
+                find "$cache" -mindepth 1 -maxdepth 1 ! -name ".*" -print0
+            done < "$scratch/roots"
+        fi
+    ' _ "$gradle_root" "$scan_dir" > "$scan_dir/targets" 2> /dev/null < /dev/null || scan_rc=$?
+    debug_timer_end "Gradle candidate listing" scan_start
+    if [[ $scan_rc -ne 0 ]]; then
+        stop_section_spinner
+        rm -rf "$scan_dir" # SAFE: exact mktemp-created Gradle scan scratch directory
+        debug_log "Gradle candidate listing incomplete (status $scan_rc); targets kept"
+        [[ $scan_rc -lt 128 ]] || return "$scan_rc"
+        return 0
+    fi
+
+    local -a build_targets=() notification_targets=() daemon_targets=()
+    local target
+    while IFS= read -r -d '' target; do
+        if [[ $SECONDS -ge $scan_deadline ]]; then
+            if [[ "$target" == "$gradle_root/caches/"* ]]; then
+                # Only build cache entries remain. An unfinished group is kept
+                # whole; the other groups were filtered on their own evidence.
+                build_targets=()
+                debug_log "Gradle build cache filtering exceeded its budget; build cache targets kept"
+                break
+            fi
+            stop_section_spinner
+            rm -rf "$scan_dir" # SAFE: exact mktemp-created Gradle scan scratch directory
+            debug_log "Gradle candidate filtering exceeded its budget; targets kept"
+            return 0
+        fi
+        # should_protect_path costs about 10 ms per path while the whitelist is
+        # a pattern match, and the default whitelist covers the whole build
+        # cache. Settle whitelisted entries first; the eligible set is unchanged.
+        if declare -f is_path_whitelisted > /dev/null 2>&1 && is_path_whitelisted "$target" 2> /dev/null; then
+            continue
+        fi
+        mole_cleanup_targets_exist "$target" || continue
+        case "$target" in
+            "$gradle_root/caches/"*) build_targets+=("$target") ;;
+            "$gradle_root/notifications/"*) notification_targets+=("$target") ;;
+            *) daemon_targets+=("$target") ;;
+        esac
+    done < "$scan_dir/targets"
+    # The scan spinner ends with the scan, before any deferral, warning row,
+    # or cleanup output.
+    stop_section_spinner
+    rm -rf "$scan_dir" # SAFE: exact mktemp-created Gradle scan scratch directory
+    debug_log "Gradle eligible targets: build=${#build_targets[@]}, notifications=${#notification_targets[@]}, daemon/workers=${#daemon_targets[@]}"
+    if [[ $((${#build_targets[@]} + ${#notification_targets[@]} + ${#daemon_targets[@]})) -gt 0 ]]; then
         local gradle_state=0
+        debug_log "Checking Gradle daemon state"
         gradle_daemon_running || gradle_state=$?
         if [[ $gradle_state -eq 0 ]]; then
             mole_defer_cleanup_family "Gradle"
         elif [[ $gradle_state -eq 1 ]]; then
             # Each group rechecks the probe at its deletion boundary; any
             # refusal stops the remaining Gradle cleanup.
-            _dev_safe_clean_process_guarded \
-                gradle_daemon_running \
-                "Gradle" \
-                "Gradle build cache" \
-                "$HOME/.gradle/caches/build-cache-"*/* \
-                "Gradle build cache" || return 0
-            _dev_safe_clean_process_guarded \
-                gradle_daemon_running \
-                "Gradle" \
-                "Gradle notifications cache" \
-                "$HOME/.gradle/notifications"/* \
-                "Gradle notifications cache" || return 0
-            _dev_safe_clean_process_guarded \
-                gradle_daemon_running \
-                "Gradle" \
-                "Gradle daemon/workers" \
-                "$HOME/.gradle/daemon"/* \
-                "$HOME/.gradle/workers"/* \
-                "Gradle daemon/workers" || return 0
+            if [[ ${#build_targets[@]} -gt 0 ]]; then
+                debug_log "Starting Gradle build cache cleanup"
+                _dev_safe_clean_process_guarded \
+                    gradle_daemon_running \
+                    "Gradle" \
+                    "Gradle build cache" \
+                    "${build_targets[@]}" \
+                    "Gradle build cache" || return 0
+            fi
+            if [[ ${#notification_targets[@]} -gt 0 ]]; then
+                debug_log "Starting Gradle notifications cleanup"
+                _dev_safe_clean_process_guarded \
+                    gradle_daemon_running \
+                    "Gradle" \
+                    "Gradle notifications cache" \
+                    "${notification_targets[@]}" \
+                    "Gradle notifications cache" || return 0
+            fi
+            if [[ ${#daemon_targets[@]} -gt 0 ]]; then
+                debug_log "Starting Gradle daemon/workers cleanup"
+                _dev_safe_clean_process_guarded \
+                    gradle_daemon_running \
+                    "Gradle" \
+                    "Gradle daemon/workers" \
+                    "${daemon_targets[@]}" \
+                    "Gradle daemon/workers" || return 0
+            fi
         else
             echo -e "  ${GRAY}${ICON_WARNING}${NC} Gradle targets · skipped (process state unknown)"
             note_activity
@@ -3595,9 +3672,10 @@ clean_claude_desktop_bundled_versions() {
 
     local sdk_version=""
     sdk_version=$(claude_desktop_sdk_version "$claude_support" || true)
+    # Unknown active version keeps every bundled version. That is a routine
+    # skip with nothing for the user to do, so it stays out of the summary.
     if [[ -z "$sdk_version" ]]; then
-        note_activity
-        echo -e "  ${GRAY}${ICON_WARNING}${NC} Claude Desktop bundled Claude Code · skipped (active version unknown)"
+        debug_log "Claude Desktop bundled Claude Code kept: active version unknown"
         return 0
     fi
 
@@ -3608,8 +3686,7 @@ clean_claude_desktop_bundled_versions() {
 
         local active_entry="$versions_root/$sdk_version"
         if [[ -L "$active_entry" || (! -f "$active_entry" && ! -d "$active_entry") ]]; then
-            note_activity
-            echo -e "  ${GRAY}${ICON_WARNING}${NC} $label · skipped (active version unknown)"
+            debug_log "$label kept: active version $sdk_version not found in $versions_root"
             return 0
         fi
     done
@@ -3872,18 +3949,18 @@ clean_dev_ai_agents() {
             _resolve_versioned_agent_active_path "$versions_root" "$active_symlink" || active_status=$?
             if [[ $active_status -ne 0 ]]; then
                 mole_rc_timeout_or_signal "$active_status" && return "$active_status"
+                # Without the active version every entry is kept; the reason
+                # belongs in --debug, not in the summary.
                 if [[ ! -e "$active_symlink" ]]; then
-                    echo -e "  ${GRAY}${ICON_WARNING}${NC} $label · skipped (active symlink broken)"
+                    debug_log "$label kept: active symlink broken"
                 else
-                    echo -e "  ${GRAY}${ICON_WARNING}${NC} $label · skipped (active version unknown)"
+                    debug_log "$label kept: active version unknown"
                 fi
-                note_activity
                 continue
             fi
             active_path="$_MOLE_VERSIONED_AGENT_ACTIVE_PATH"
             if [[ -z "$active_path" ]]; then
-                echo -e "  ${GRAY}${ICON_WARNING}${NC} $label · skipped (active symlink broken)"
-                note_activity
+                debug_log "$label kept: active symlink broken"
                 continue
             fi
         fi
@@ -5302,6 +5379,7 @@ _run_developer_cleanup_step() {
     fi
 
     local step_name="${1:-developer cleanup step}"
+    debug_log "Starting developer cleanup step: $step_name"
     local _perf_step_start
     debug_timer_start _perf_step_start
     local step_rc=0

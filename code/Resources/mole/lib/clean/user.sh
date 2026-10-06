@@ -2736,14 +2736,19 @@ check_large_file_candidates() {
     _large_candidate_size_kb() {
         local path="$1"
         local timeout_seconds="${2:-${MOLE_LARGE_CANDIDATE_SIZE_TIMEOUT:-3}}"
+        local exact="${3:-}"
         [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || timeout_seconds=3
         local du_output="" du_rc=0
         du_output=$(run_with_timeout "$timeout_seconds" du -skP "$path" 2> /dev/null) || du_rc=$?
         # Review-only: a timed-out or failed du skips this row. Signals still
-        # cancel the run so Ctrl-C stays sticky.
+        # cancel the run so Ctrl-C stays sticky. BSD du exits 1 when some
+        # entry is unreadable yet still prints the total of everything it
+        # read, a usable lower bound; a timeout's output is never a total.
+        # Rows passed "exact" (E5RT, #1631) never show a lower bound.
         if [[ $du_rc -ge 128 ]]; then
             return "$du_rc"
         fi
+        [[ $du_rc -eq 0 || ($du_rc -eq 1 && "$exact" != "exact") ]] || return 1
         local size_kb="${du_output%%[^0-9]*}"
         [[ "$size_kb" =~ ^[0-9]+$ ]] || return 1
         printf '%s\n' "$size_kb"
@@ -2773,7 +2778,9 @@ check_large_file_candidates() {
     # short size field, so it lands in a stable column and reads as a date on
     # its own. The review icon carries the review-only semantics;
     # format_path_link keeps the path clickable even with spaces (OSC 8 link,
-    # not terminal auto-linking).
+    # not terminal auto-linking). The label already names the location, so
+    # the link shows only the last two segments; the full path stays one
+    # click away, and plain-text output keeps it whole.
     _report_large_review_row() {
         local label="$1"
         local size_human="$2"
@@ -2781,22 +2788,31 @@ check_large_file_candidates() {
         local newest_date="${4:-}"
         local date_part=""
         [[ -n "$newest_date" ]] && date_part=" · ${GRAY}${newest_date}${NC}"
+        local shown="${path/#$HOME/~}"
+        local tail="${shown%/*}"
+        tail="${tail##*/}/${shown##*/}"
+        # shellcheck disable=SC2088 # compares the ~-abbreviated display text, not a path
+        if [[ "$shown" != "~/$tail" && "$shown" != "/$tail" && "$shown" != "$tail" ]]; then
+            shown="…/$tail"
+        fi
         stop_section_spinner
-        echo -e "  ${YELLOW}${ICON_REVIEW}${NC} ${label} · ${GREEN}${size_human}${NC}${date_part} · ${GRAY}$(format_path_link "$path")${NC}"
+        echo -e "  ${YELLOW}${ICON_REVIEW}${NC} ${label} · ${GREEN}${size_human}${NC}${date_part} · ${GRAY}$(format_path_link "$path" "$shown")${NC}"
         found_any=true
         start_section_spinner "Scanning large files..."
     }
 
     # Pass "date" as $4 on rows where staleness decides the action. Rows left
-    # without it stay two fields wide.
+    # without it stay two fields wide. Pass "exact" as $5 to drop the row
+    # instead of showing a total that skipped unreadable entries.
     _report_large_review_dir() {
         local label="$1"
         local path="$2"
         local probe_timeout="${3:-}"
         local want_date="${4:-}"
+        local exact="${5:-}"
         [[ -d "$path" ]] || return 0
         local size_kb="" size_rc=0
-        size_kb=$(_large_candidate_size_kb "$path" "$probe_timeout") || size_rc=$?
+        size_kb=$(_large_candidate_size_kb "$path" "$probe_timeout" "$exact") || size_rc=$?
         if [[ $size_rc -ge 128 ]]; then
             return "$size_rc"
         fi
@@ -2934,6 +2950,41 @@ check_large_file_candidates() {
     # row measures the whole folder, including the build-cache slices that
     # clean_dev_jvm resets.
     _report_large_or_stop "Gradle caches" "$HOME/.gradle/caches" || return $?
+
+    # E5RT caches stay protected. This row measures occupied space only;
+    # neither the current build nor older build subdirectories are deleted.
+    # Bound the complete listing and all measurements with one shared budget.
+    local cache_root="$HOME/Library/Caches"
+    local compiled_list=""
+    # Without a scratch listing only this row is skipped; the remaining rows
+    # and the section's activity still follow.
+    if [[ -d "$cache_root" && ! -L "$cache_root" ]] && compiled_list=$(create_temp_file); then
+        local compiled_rc=0 compiled_path compiled_owner compiled_timeout
+        local compiled_deadline=$((SECONDS + MOLE_TIMEOUT_HINT_SCAN_SEC))
+        run_with_timeout "$MOLE_TIMEOUT_HINT_SCAN_SEC" find "$cache_root" -mindepth 1 -maxdepth 2 \
+            \( -name '.*' -prune \) -o \
+            \( -type d -name 'com.apple.e5rt.e5bundlecache' -print0 \) \
+            > "$compiled_list" 2> /dev/null < /dev/null || compiled_rc=$?
+        if [[ $compiled_rc -eq 0 ]]; then
+            while IFS= read -r -d '' compiled_path; do
+                [[ -d "$compiled_path" && ! -L "$compiled_path" && ! -L "${compiled_path%/*}" ]] || continue
+                compiled_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_HINT_SCAN_SEC" "$compiled_deadline") || break
+                compiled_owner="${compiled_path%/*}"
+                _report_large_or_stop "Compiled model cache (${compiled_owner##*/})" "$compiled_path" "$compiled_timeout" "" exact || {
+                    compiled_rc=$?
+                    break
+                }
+            done < "$compiled_list"
+        else
+            debug_log "Compiled model cache listing incomplete (status $compiled_rc); review skipped"
+        fi
+        rm -f "$compiled_list" # SAFE: exact mktemp-created compiled cache listing
+        if [[ $compiled_rc -ge 128 ]]; then
+            _mole_record_clean_cancellation "$compiled_rc"
+            stop_section_spinner
+            return "$compiled_rc"
+        fi
+    fi
 
     # Emulator images, SDK system images, downloaded models, and installed
     # runtimes are user-chosen payloads, not caches. Size is shown so the

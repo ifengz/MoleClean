@@ -569,6 +569,73 @@ get_free_space() {
     echo "Unknown"
 }
 
+# Keep literal parent paths once without interpreting glob metacharacters.
+# Callers with newline-bearing paths handle those outside this line format.
+mole_filter_nested_paths() {
+    [[ $# -gt 0 ]] || return 0
+    local -a paths=("${@}")
+    local path normalized existing skip
+    local -a kept=()
+    if [[ ${#paths[@]} -le 50 ]]; then
+        for path in "${paths[@]}"; do
+            normalized="${path%/}"
+            [[ -n "$normalized" ]] || normalized="$path"
+            skip=false
+            local -a remaining=()
+            for existing in "${kept[@]+"${kept[@]}"}"; do
+                if [[ "$normalized" == "$existing" || "$normalized" == "$existing"/* || "$existing" == / ]]; then
+                    skip=true
+                    break
+                fi
+                [[ "$existing" == "$normalized"/* || "$normalized" == / ]] || remaining+=("$existing")
+            done
+            if [[ "$skip" == false ]]; then
+                kept=("${remaining[@]+"${remaining[@]}"}" "$normalized")
+            fi
+        done
+        printf '%s\n' "${kept[@]}"
+        return
+    fi
+    # A prefix sibling can sort between a parent and its child. Remember all
+    # kept ancestors, rather than only the last row, and publish a complete pass.
+    local filtered=""
+    filtered=$(printf '%s\n' "${paths[@]}" | LC_ALL=C awk '{if ($0 != "/") sub(/\/$/, ""); print}' |
+        LC_ALL=C sort -u | LC_ALL=C awk '
+        {
+            if (seen["/"]) next
+            parent=$0; skip=0
+            while (parent != "") {
+                if (seen[parent]) {skip=1; break}
+                if (!sub(/\/[^\/]*$/, "", parent)) break
+            }
+            if (!skip) {seen[$0]=1; print}
+        }') || return $?
+    [[ -z "$filtered" ]] || printf '%s\n' "$filtered"
+    return 0
+}
+
+# Wait in the owning shell so Bash 3.2 can reap any completed scan worker.
+# The first argument names a caller variable receiving the completed PID;
+# the return status belongs to that worker, or to an interrupted polling sleep.
+mole_wait_for_any_worker() {
+    local _wait_output_name="$1"
+    shift
+    local _wait_pid _wait_status
+    while [[ $# -gt 0 ]]; do
+        for _wait_pid in "$@"; do
+            if kill -0 "$_wait_pid" 2> /dev/null; then
+                continue
+            fi
+            printf -v "$_wait_output_name" '%s' "$_wait_pid"
+            _wait_status=0
+            wait "$_wait_pid" 2> /dev/null || _wait_status=$?
+            return "$_wait_status"
+        done
+        sleep 0.02 || return $?
+    done
+    return 1
+}
+
 # Get optimal parallel jobs for operation type (scan|io|compute|default)
 get_optimal_parallel_jobs() {
     local operation_type="${1:-default}"
@@ -893,12 +960,17 @@ percent_encode_path() {
 # Print a path as an OSC 8 file:// hyperlink so terminals keep it clickable
 # even when it contains spaces (auto-detection breaks on whitespace). Shows
 # the ~-abbreviated path; piped output and non-ANSI terminals get plain text.
+# An optional $2 replaces the visible text inside the link only: without a
+# link to carry the full path, plain text always shows the whole path.
 format_path_link() {
     local path="$1"
     local display="${path/#$HOME/~}"
     if ! is_ansi_supported 2> /dev/null; then
         printf '%s' "$display"
         return 0
+    fi
+    if [[ -n "${2:-}" ]]; then
+        display="$2"
     fi
     # ESC-backslash is the OSC 8 string terminator; kept in a variable since
     # a single-quoted printf format ending in \\ trips ShellCheck SC1003.
