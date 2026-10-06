@@ -505,6 +505,8 @@ is_protected_vendor_dir() {
 # way: callers keep the candidate but must say so instead of dropping it.
 purge_artifact_has_authored_content() {
     local path="${1%/}"
+    local deadline="${2:-}"
+    local probe_timeout=""
     [[ -d "$path" ]] || return 1
     # A configured root can cross a symlink before reaching the candidate.
     # Git ancestry must follow the actual repository, not the alias spelling.
@@ -513,7 +515,8 @@ purge_artifact_has_authored_content() {
     # Do not follow links or read key contents. This walks the whole artifact
     # when nothing matches, so it takes the tree-walk budget, not the
     # command-probe one.
-    evidence=$(run_with_timeout "$MOLE_TIMEOUT_HINT_SCAN_SEC" /usr/bin/find "$path" \
+    probe_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_HINT_SCAN_SEC" "$deadline") || return 2
+    evidence=$(run_with_timeout "$probe_timeout" /usr/bin/find "$path" \
         \( -name .git -o -name '*-keypair.json' \) -print -quit 2> /dev/null) || return 2
     [[ -z "$evidence" ]] || return 0
 
@@ -521,7 +524,8 @@ purge_artifact_has_authored_content() {
     while [[ "$ancestor" != "/" && -n "$ancestor" ]]; do
         if [[ -e "$ancestor/.git" || -L "$ancestor/.git" ]]; then
             # Ignore inherited Git routing; inspect this directory's own repo.
-            evidence=$(run_with_timeout "$MOLE_TIMEOUT_HINT_SCAN_SEC" \
+            probe_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_HINT_SCAN_SEC" "$deadline") || return 2
+            evidence=$(run_with_timeout "$probe_timeout" \
                 env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
                 GIT_OPTIONAL_LOCKS=0 GIT_LITERAL_PATHSPECS=1 \
                 git -c core.fsmonitor=false --git-dir="$ancestor/.git" --work-tree="$ancestor" -C "$path" ls-files -- . 2> /dev/null) || return 2
@@ -539,11 +543,12 @@ PURGE_PROTECTION_UNVERIFIED=false
 
 is_protected_purge_artifact() {
     local path="${1%/}"
+    local deadline="${2:-}"
     local base="${path##*/}"
 
     PURGE_PROTECTION_UNVERIFIED=false
     local authored_rc=0
-    purge_artifact_has_authored_content "$path" || authored_rc=$?
+    purge_artifact_has_authored_content "$path" "$deadline" || authored_rc=$?
     if [[ $authored_rc -eq 2 ]]; then
         PURGE_PROTECTION_UNVERIFIED=true
         return 0
@@ -879,14 +884,21 @@ filter_nested_artifacts() {
 
 filter_protected_artifacts() {
     local deadline="${1:-}"
+    local protected_rc
     while IFS= read -r item; do
         if [[ "$deadline" =~ ^[0-9]+$ && $SECONDS -ge $deadline ]]; then
             return 124
         fi
         # An unfinished probe is not evidence either way. Keep the candidate
         # visible; the in-process recheck before the menu reports it.
-        if ! is_protected_purge_artifact "$item" ||
-            [[ "$PURGE_PROTECTION_UNVERIFIED" == "true" ]]; then
+        protected_rc=0
+        is_protected_purge_artifact "$item" "$deadline" || protected_rc=$?
+        # The last probe can consume the remaining budget too. Never publish
+        # that root's prefix as complete, even when there is no next item.
+        if [[ "$deadline" =~ ^[0-9]+$ && $SECONDS -ge $deadline ]]; then
+            return 124
+        fi
+        if [[ $protected_rc -ne 0 || "$PURGE_PROTECTION_UNVERIFIED" == "true" ]]; then
             echo "$item"
         fi
     done
@@ -2237,28 +2249,21 @@ clean_project_artifacts() {
         _max_size_jobs=8
     fi
 
-    # Reap any finished PID from the sliding window. Uses `wait -n` when
-    # available (bash 4.3+) to avoid blocking on the slowest job; falls
-    # back to first-PID wait on macOS default bash 3.2.
-    local _has_wait_n=false
-    if [[ "${BASH_VERSINFO[0]:-0}" -gt 4 ]] ||
-        { [[ "${BASH_VERSINFO[0]:-0}" -eq 4 ]] && [[ "${BASH_VERSINFO[1]:-0}" -ge 3 ]]; }; then
-        _has_wait_n=true
-    fi
+    # Keep the sliding window full on Bash 3.2 as well as newer shells.
     _reap_one_size_pid() {
-        if [[ "$_has_wait_n" == "true" ]]; then
-            wait -n "${_size_pids[@]}" 2> /dev/null || true
-            local -a _remaining=()
-            for _p in "${_size_pids[@]}"; do
-                if kill -0 "$_p" 2> /dev/null; then
-                    _remaining+=("$_p")
-                fi
-            done
-            _size_pids=("${_remaining[@]}")
-        else
-            wait "${_size_pids[0]}" 2> /dev/null || true
-            _size_pids=("${_size_pids[@]:1}")
+        local completed_pid="" size_slot worker_rc=0
+        mole_wait_for_any_worker completed_pid "${_size_pids[@]}" || worker_rc=$?
+        if [[ $worker_rc -ge 128 ]]; then
+            [[ $_size_interrupt_status -ge 128 ]] || _size_interrupt_status=$worker_rc
+            _cleanup_purge_size_workers
+            return 0
         fi
+        for size_slot in "${!_size_pids[@]}"; do
+            if [[ "${_size_pids[$size_slot]}" == "$completed_pid" ]]; then
+                unset '_size_pids[size_slot]'
+                break
+            fi
+        done
     }
 
     local _size_previous_int_trap=""

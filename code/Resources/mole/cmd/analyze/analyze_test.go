@@ -17,6 +17,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Navigation starts a replacement scan immediately, so abandoned scan work
@@ -1865,6 +1866,47 @@ func TestLiveScanInitialListingShowsImmediateChildren(t *testing.T) {
 	}
 	if !foundFile || !foundDir {
 		t.Fatalf("expected immediate file and directory entries, got %+v", start.entries)
+	}
+}
+
+func TestLiveFoldedScanWaitsForDuPermit(t *testing.T) {
+	for _, cancelWaiting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel_waiting_%t", cancelWaiting), func(t *testing.T) {
+			started := installBlockingDuProbe(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			limiter := newScanLimiter(1)
+			limiter.duSem = make(chan struct{}, 1)
+			limiter.duSem <- struct{}{}
+			var files, dirs, bytes int64
+			currentPath := &atomic.Value{}
+			currentPath.Store("")
+			target := t.TempDir()
+			done := make(chan error, 1)
+			go func() {
+				_, err := scanLiveTarget(ctx, liveScanTarget{path: target, kind: liveScanTargetFoldedDirectory},
+					make(chan fileEntry, 1), limiter, &files, &dirs, &bytes, currentPath,
+					scanCacheBypass, newScanPublication(ctx, cancel))
+				done <- err
+			}()
+			time.Sleep(100 * time.Millisecond)
+			if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("folded-directory du started while its resource budget was full")
+			}
+			if !cancelWaiting {
+				<-limiter.duSem
+				waitForTestPath(t, started)
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected canceled scan, got %v", err)
+				}
+			case <-time.After(liveScanCancellationBudget):
+				t.Fatal("folded scan did not cancel while waiting for or using du")
+			}
+		})
 	}
 }
 
@@ -3777,6 +3819,55 @@ func TestOverviewPartialMeasurementKeepsBytesAndUnknownRows(t *testing.T) {
 	}
 }
 
+func TestOverviewMeasurementFailureStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		size   int64
+		err    error
+		prefix string
+		reason string
+		state  scanState
+	}{
+		{"partial permission", 4096, os.ErrPermission, "Partial size", "access denied", scanPartial},
+		{"unavailable permission", 0, os.ErrPermission, "Size unavailable", "access denied", scanUnavailable},
+		{"partial timeout", 4096, context.DeadlineExceeded, "Partial size", "timed out", scanPartial},
+		{"unavailable timeout", 0, context.DeadlineExceeded, "Size unavailable", "timed out", scanUnavailable},
+		{"cancelled", 0, context.Canceled, "Size unavailable", "cancelled", scanUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "Library", "Developer", "CoreSimulator", "Devices")
+			pending := filepath.Join(root, "pending")
+			m := model{
+				path: "/", isOverview: true, width: 80, height: 24,
+				entries: []dirEntry{
+					{Name: "Xcode Simulators", Path: root, IsDir: true, Size: -1},
+					{Name: "Pending", Path: pending, IsDir: true, Size: -1},
+				},
+				overviewScanningSet: map[string]*scanPublication{pending: {}},
+			}
+			wrapped := fmt.Errorf("du incomplete for %s: %w", root, tc.err)
+			updated, _ := m.Update(overviewSizeMsg{Path: root, Size: tc.size, Err: wrapped})
+			m = updated.(model)
+			if !strings.HasPrefix(m.status, tc.prefix) || !strings.Contains(m.status, tc.reason) ||
+				strings.Count(m.status, "Xcode Simulators") != 1 || strings.Contains(m.status, root) {
+				t.Fatalf("misleading or repetitive measurement status: %q", m.status)
+			}
+			if m.entries[0].Size != tc.size || m.entries[0].State != tc.state || m.totalSize != tc.size || !m.overviewScanning {
+				t.Fatalf("status changed measurement coverage or stopped later work: %+v", m)
+			}
+			view := m.View()
+			if !strings.Contains(view, tc.reason) {
+				t.Fatalf("measurement reason is absent from view: %s", view)
+			}
+			for line := range strings.SplitSeq(view, "\n") {
+				if strings.Contains(line, tc.prefix) && ansi.StringWidth(line) > m.width {
+					t.Fatalf("measurement status overflows %d columns: %q", m.width, line)
+				}
+			}
+		})
+	}
+}
+
 func TestSelectionAndConfirmationPreserveMeasurementCoverage(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -3934,6 +4025,8 @@ func TestTransientPartialIsNotCachedAndDenialOnlyPartialIs(t *testing.T) {
 		{name: "permission denied", stderr: "du: /x/locked: Permission denied"},
 		{name: "operation not permitted", stderr: "du: /x/Mail: Operation not permitted"},
 		{name: "io error", stderr: "du: /x/disk: Input/output error", transient: true},
+		{name: "dataless directory", stderr: "du: /x/placeholder: Resource deadlock avoided", transient: true},
+		{name: "mixed failures", stderr: "du: /x/locked: Permission denied\ndu: /x/placeholder: Resource deadlock avoided", transient: true},
 		{name: "no diagnostic", transient: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4119,6 +4212,128 @@ func TestSchemaFiveSizesAreRejectedByEveryLoader(t *testing.T) {
 	}
 }
 
+func TestOverviewScanRefillsOnlyAvailableSlots(t *testing.T) {
+	m := model{path: "/", isOverview: true}
+	for i := range maxConcurrentOverview * 3 {
+		m.entries = append(m.entries, dirEntry{Path: fmt.Sprintf("/fixture/%d", i), Size: -1})
+	}
+	t.Cleanup(func() {
+		for _, publication := range m.overviewScanningSet {
+			publication.cancel()
+		}
+	})
+	if m.scheduleOverviewScans() == nil || len(m.overviewScanningSet) != maxConcurrentOverview {
+		t.Fatal("initial scan did not fill the overview budget")
+	}
+	if m.scheduleOverviewScans() != nil || !m.overviewScanning || len(m.overviewScanningSet) != maxConcurrentOverview {
+		t.Fatal("full overview budget must keep active scans without dispatching more")
+	}
+	completed := m.entries[0].Path
+	m.entries[0].Size = 1
+	m.overviewScanningSet[completed].cancel()
+	delete(m.overviewScanningSet, completed)
+	if m.scheduleOverviewScans() == nil || len(m.overviewScanningSet) != maxConcurrentOverview {
+		t.Fatal("one completion must refill exactly one slot")
+	}
+}
+
+// countTickMsgs runs cmd and every command it batches, counting the tick
+// loops it would start. Scan commands for missing fixture paths return fast.
+func countTickMsgs(t *testing.T, cmd tea.Cmd) int {
+	t.Helper()
+	if cmd == nil {
+		return 0
+	}
+	switch msg := cmd().(type) {
+	case tickMsg:
+		return 1
+	case tea.BatchMsg:
+		total := 0
+		for _, sub := range msg {
+			total += countTickMsgs(t, sub)
+		}
+		return total
+	default:
+		return 0
+	}
+}
+
+func TestOverviewRefillsKeepOneTickLoop(t *testing.T) {
+	m := model{path: "/", isOverview: true}
+	for i := range maxConcurrentOverview + 4 {
+		m.entries = append(m.entries, dirEntry{Path: fmt.Sprintf("/nonexistent-mole-fixture/%d", i), Size: -1})
+	}
+	t.Cleanup(func() { m.cancelOverviewScans(nil) })
+	if got := countTickMsgs(t, m.scheduleOverviewScans()); got != 1 {
+		t.Fatalf("initial dispatch started %d tick loops, want 1", got)
+	}
+	// Each completion refills one slot. The running loop keeps the spinner
+	// moving, so a refill that also armed a loop would speed it up per row.
+	for i := range 4 {
+		completed := m.entries[i].Path
+		m.entries[i].Size = 1
+		m.overviewScanningSet[completed].cancel()
+		delete(m.overviewScanningSet, completed)
+		if got := countTickMsgs(t, m.scheduleOverviewScans()); got != 0 {
+			t.Fatalf("refill %d started %d extra tick loops", i+1, got)
+		}
+	}
+}
+
+func TestSwitchToOverviewKeepsFullBudgetScanning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetOverviewSnapshotForTest()
+	t.Cleanup(resetOverviewSnapshotForTest)
+	m := model{path: "/", isOverview: true}
+	for i := range maxConcurrentOverview {
+		m.entries = append(m.entries, dirEntry{Path: fmt.Sprintf("/fixture/%d", i), Size: -1})
+	}
+	m.scheduleOverviewScans()
+	t.Cleanup(func() { m.cancelOverviewScans(nil) })
+	if len(m.overviewScanningSet) != maxConcurrentOverview {
+		t.Fatal("fixture must fill the overview scan budget")
+	}
+	m.isOverview = false
+	m.path = t.TempDir()
+	m.status = "Ready"
+	if m.switchToOverviewMode() == nil || !m.overviewScanning || m.status == "Ready" {
+		t.Fatal("returning to an active overview must retain its scanning status")
+	}
+	if len(m.overviewScanningSet) != maxConcurrentOverview {
+		t.Fatal("returning to an active overview must not dispatch excess scans")
+	}
+}
+
+func TestGoBackToOverviewRestartsFullBudgetTick(t *testing.T) {
+	m := model{path: "/", isOverview: true}
+	for i := range maxConcurrentOverview * 2 {
+		m.entries = append(m.entries, dirEntry{Path: fmt.Sprintf("/fixture/%d", i), Size: -1})
+	}
+	m.scheduleOverviewScans()
+	t.Cleanup(func() { m.cancelOverviewScans(nil) })
+	m.history = []historyEntry{{Path: "/", IsOverview: true, Entries: m.entries}}
+	m.isOverview = false
+	m.path = "/fixture/completed"
+	m.status = "Loaded folder"
+	m.scanning = false
+	stopped, cmd := m.Update(tickMsg{})
+	if cmd != nil {
+		t.Fatal("completed drill-down must stop its tick chain")
+	}
+	m = stopped.(model)
+	updated, cmd := m.goBack()
+	got := updated.(model)
+	if cmd == nil || !got.overviewScanning || got.status == "Loaded folder" {
+		t.Fatal("history return must restore the active overview status and tick")
+	}
+	if _, ok := cmd().(tickMsg); !ok {
+		t.Fatal("history return must restart animation without dispatching more scans")
+	}
+	if len(got.overviewScanningSet) != maxConcurrentOverview {
+		t.Fatal("history return exceeded the overview concurrency budget")
+	}
+}
+
 func TestDeleteRejectsAlreadyMeasuredOverviewMessage(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -4218,7 +4433,9 @@ func TestDeleteCancelsOverviewPublicationBeforeInvalidation(t *testing.T) {
 	}
 	m.path, m.isOverview = "/", true
 	m.entries = []dirEntry{{Name: "Project", Path: root, IsDir: true, Size: -1}, {Name: "Applications", Path: sibling, IsDir: true, Size: -1}}
-	newBatch := m.scheduleOverviewScans()().(tea.BatchMsg)
+	// The first dispatch's tick loop is still running, so this refill is the
+	// scan command alone rather than a batch with another tick.
+	newScan := m.scheduleOverviewScans()
 	newPublication := m.overviewScanningSet[root]
 	if newPublication == nil || newPublication == oldPublication {
 		t.Fatal("replacement scan missing")
@@ -4231,7 +4448,7 @@ func TestDeleteCancelsOverviewPublicationBeforeInvalidation(t *testing.T) {
 	if _, ok := m.overviewSizeCache[root]; ok {
 		t.Fatal("old message restored an in-memory size")
 	}
-	fresh := newBatch[0]().(overviewSizeMsg)
+	fresh := newScan().(overviewSizeMsg)
 	updated, _ = m.Update(fresh)
 	m = updated.(model)
 	if fresh.Err != nil || m.overviewSizeCache[root] != 4096 {

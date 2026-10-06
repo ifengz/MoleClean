@@ -17,19 +17,24 @@ func (m *model) scheduleOverviewScans() tea.Cmd {
 	if !m.inOverviewMode() {
 		return nil
 	}
+	availableSlots := maxConcurrentOverview - len(m.overviewScanningSet)
+	if availableSlots <= 0 {
+		m.overviewScanning = true
+		return nil
+	}
 
 	var pendingIndices []int
 	for i, entry := range m.entries {
 		if entry.Size < 0 && m.overviewScanningSet[entry.Path] == nil {
 			pendingIndices = append(pendingIndices, i)
-			if len(pendingIndices) >= maxConcurrentOverview {
+			if len(pendingIndices) >= availableSlots {
 				break
 			}
 		}
 	}
 
 	if len(pendingIndices) == 0 {
-		m.overviewScanning = false
+		m.overviewScanning = len(m.overviewScanningSet) > 0
 		if !hasPendingOverviewEntries(m.entries) {
 			m.sortOverviewEntriesBySize()
 			m.status = "Ready"
@@ -66,7 +71,7 @@ func (m *model) scheduleOverviewScans() tea.Cmd {
 		}
 	}
 
-	cmds = append(cmds, tickCmd())
+	cmds = append(cmds, m.startTick())
 	return tea.Batch(cmds...)
 }
 
@@ -124,6 +129,18 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(uiTickInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// startTick arms the animation loop only when none is running. Each loop
+// re-arms itself while work remains, so a second one would double the
+// spinner speed; overview refills start scans one at a time and must not
+// add a loop per completion.
+func (m *model) startTick() tea.Cmd {
+	if m.tickRunning {
+		return nil
+	}
+	m.tickRunning = true
+	return tickCmd()
 }
 
 func (m *model) cancelLiveScan() {
@@ -492,8 +509,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.inOverviewMode() {
+			name := filepath.Base(msg.Path)
 			for i := range m.entries {
 				if m.entries[i].Path == msg.Path {
+					if m.entries[i].Name != "" {
+						name = m.entries[i].Name
+					}
 					m.entries[i].Size = msg.Size
 					m.entries[i].State = measurementState(msg.Size, msg.Err)
 					break
@@ -503,7 +524,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scanState = entryScanState(m.entries)
 
 			if msg.Err != nil {
-				m.status = fmt.Sprintf("Unable to measure %s: %v", displayPath(msg.Path), msg.Err)
+				label := "Size unavailable"
+				if msg.Size > 0 {
+					label = "Partial size"
+				}
+				m.status = fmt.Sprintf("%s: %s (%s)", label, name, measurementErrorReason(msg.Err))
 			}
 
 			cmd := m.scheduleOverviewScans()
@@ -538,8 +563,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = fmt.Sprintf("Moving to Trash... %s items", formatNumber(count))
 				}
 			}
+			m.tickRunning = true
 			return m, tickCmd()
 		}
+		m.tickRunning = false
 		return m, nil
 	default:
 		return m, nil
@@ -1131,7 +1158,12 @@ func (m model) goBack() (tea.Model, tea.Cmd) {
 		if hasPendingOverviewEntries(m.entries) {
 			m.totalSize = sumKnownEntrySizes(m.entries)
 			m.scanState = entryScanState(m.entries)
-			return m, m.scheduleOverviewScans()
+			cmd := m.scheduleOverviewScans()
+			if cmd == nil && m.overviewScanning {
+				m.status = "Checking system folders..."
+				cmd = m.startTick()
+			}
+			return m, cmd
 		}
 		m.status = scanSummary(m.totalSize, m.scanState)
 		return m, nil
@@ -1176,6 +1208,10 @@ func (m *model) switchToOverviewMode() tea.Cmd {
 	m.snapshotProbeID++
 	cmd := m.scheduleOverviewScans()
 	if cmd == nil {
+		if m.overviewScanning {
+			m.status = "Checking system folders..."
+			return tea.Batch(m.detectLocalSnapshotsCmd(), tickCmd())
+		}
 		m.status = "Ready"
 		return m.detectLocalSnapshotsCmd()
 	}

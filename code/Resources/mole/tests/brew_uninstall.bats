@@ -205,14 +205,18 @@ EOF
 }
 
 @test "batch_uninstall_applications uses brew uninstall for casks (mocked)" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
     # Setup fake app
-    local app_bundle="$HOME/Applications/BrewApp.app"
+    local app_bundle="$fixture_home/Applications/BrewApp.app"
     mkdir -p "$app_bundle"
 
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 # Mock dependencies
 request_sudo_access() { return 0; }
@@ -249,25 +253,33 @@ total_items=0
 total_size_cleaned=0
 
 # Simulate 'Enter' for confirmation
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | batch_uninstall_applications
 
 grep -q "ENSURE_SUDO:Admin required for Homebrew casks: BrewApp" "$HOME/brew_calls.log"
 grep -q "uninstall --cask --zap brew-app-cask" "$HOME/brew_calls.log"
+[[ $(wc -l < "$HOME/inventory.trace") -ge 2 ]] || exit 1
 EOF
 
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ] || {
+        printf 'exit status: %s\n%s\n' "$status" "$output"
+        return 1
+    }
 }
 
 @test "batch_uninstall_applications drops --zap when a sibling install shares the cask bundle id" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
     # iterm2 and iterm2-beta both zap com.googlecode.iterm2. When the stable
     # install survives, uninstalling the beta cask must not run the zap
     # stanza, or brew deletes the survivor's prefs/caches behind the guard.
-    mkdir -p "$HOME/Applications/BrewShared.app" "$HOME/Applications/BrewShared-beta.app"
+    mkdir -p "$fixture_home/Applications/BrewShared.app" "$fixture_home/Applications/BrewShared-beta.app"
 
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 request_sudo_access() { return 0; }
 start_inline_spinner() { :; }
@@ -329,17 +341,23 @@ fi
 }
 EOF
 
+    [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
+
     [ "$status" -eq 0 ]
 }
 
 @test "batch_uninstall_applications pre-auths sudo for brew-only casks" {
-    local app_bundle="$HOME/Applications/BrewPreAuth.app"
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
+    local app_bundle="$fixture_home/Applications/BrewPreAuth.app"
     mkdir -p "$app_bundle"
 
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 start_inline_spinner() { :; }
 stop_inline_spinner() { :; }
@@ -372,24 +390,32 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | batch_uninstall_applications
 
 grep -q "ENSURE_SUDO:Admin required for Homebrew casks: BrewPreAuth" "$HOME/order.log"
 grep -q "BREW_CALL:uninstall --cask --zap brew-preauth-cask" "$HOME/order.log"
-[[ "$(sed -n '1p' "$HOME/order.log")" == "ENSURE_SUDO:Admin required for Homebrew casks: BrewPreAuth" ]]
+[[ "$(sed -n '1p' "$HOME/order.log")" == "ENSURE_SUDO:Admin required for Homebrew casks: BrewPreAuth" ]] || exit 1
+[[ $(wc -l < "$HOME/inventory.trace") -ge 2 ]] || exit 1
 EOF
 
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ] || {
+        printf 'exit status: %s\n%s\n' "$status" "$output"
+        return 1
+    }
 }
 
 @test "batch_uninstall_applications runs silent brew autoremove without UX noise" {
-    local app_bundle="$HOME/Applications/BrewTimeout.app"
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
+    local app_bundle="$fixture_home/Applications/BrewTimeout.app"
     mkdir -p "$app_bundle"
 
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 request_sudo_access() { return 0; }
 start_inline_spinner() { :; }
@@ -434,19 +460,25 @@ else
 fi
 EOF
 
+    [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
+
     [ "$status" -eq 0 ]
     [[ "$output" == *"TIMEOUT_CALL:30:brew autoremove"* ]] || return 1
     [[ "$output" != *"Checking brew dependencies"* ]]
 }
 
 @test "batch_uninstall_applications keeps brew-managed app intact when brew uninstall fails" {
-    local app_bundle="$HOME/Applications/BrewBroken.app"
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
+    local app_bundle="$fixture_home/Applications/BrewBroken.app"
     mkdir -p "$app_bundle"
 
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 start_inline_spinner() { :; }
 stop_inline_spinner() { :; }
@@ -495,17 +527,23 @@ printf '\n' | batch_uninstall_applications > /dev/null 2>&1 || true
 [[ ! -f "$HOME/remove.log" ]]
 EOF
 
+    [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
+
     [ "$status" -eq 0 ]
 }
 
 @test "batch_uninstall_applications finishes cleanup after brew removes cask record" {
-    local app_bundle="$HOME/Applications/BrewCleanup.app"
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
+    local app_bundle="$fixture_home/Applications/BrewCleanup.app"
     mkdir -p "$app_bundle"
 
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 start_inline_spinner() { :; }
 stop_inline_spinner() { :; }
@@ -554,18 +592,24 @@ printf '\n' | batch_uninstall_applications > /dev/null 2>&1
 grep -q "SAFE_REMOVE:$HOME/Applications/BrewCleanup.app" "$HOME/remove.log"
 EOF
 
+    [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
+
     [ "$status" -eq 0 ]
 }
 
 @test "brew fallback preserves mutable-parent diagnosis after its cask record disappears" {
-    local app_bundle="$HOME/Applications/BrewManual.app"
-    local leftover="$HOME/Library/Application Support/BrewManual"
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
+    local app_bundle="$fixture_home/Applications/BrewManual.app"
+    local leftover="$fixture_home/Library/Application Support/BrewManual"
     mkdir -p "$app_bundle" "$leftover"
 
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 start_inline_spinner() { :; }
 stop_inline_spinner() { :; }
@@ -603,22 +647,28 @@ total_size_cleaned=0
 printf '\n' | batch_uninstall_applications
 EOF
 
+    [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
+
     [ "$status" -eq 0 ] || {
         echo "$output"
         return 1
     }
     [[ -d "$app_bundle" ]] || return 1
     [[ -d "$leftover" ]] || return 1
-    [[ ! -e "$HOME/brew-manual-side-effects.log" ]] || return 1
+    [[ ! -e "$fixture_home/brew-manual-side-effects.log" ]] || return 1
     [[ "$output" == *"Mole cannot safely use elevated deletion below a user-writable parent"* ]] || return 1
     [[ "$output" == *"Move the app to Trash in Finder"* ]] || return 1
 }
 
 @test "batch_uninstall_applications skips brew sudo pre-auth in dry-run mode" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
 
 brew() {
     echo "BREW_CALL:$*" >> "$HOME/dry_run.log"
@@ -655,6 +705,8 @@ printf '\n' | batch_uninstall_applications > /dev/null 2>&1
 
 ! grep -q "UNEXPECTED_ENSURE_SUDO:" "$HOME/dry_run.log" 2> /dev/null
 EOF
+
+    [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
 
     [ "$status" -eq 0 ]
 }
@@ -695,7 +747,7 @@ source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/brew.sh"
 
 find() {
-    echo "/opt/homebrew/Caskroom/test-cask-app/1.0.0/TestCaskApp.app"
+    printf '%s\0' "/opt/homebrew/Caskroom/test-cask-app/1.0.0/TestCaskApp.app"
 }
 run_with_timeout() {
     shift
@@ -706,7 +758,8 @@ _mole_brew_probe() {
     return 0
 }
 
-_detect_cask_via_caskroom_search "$TEST_APP_PATH"
+_mole_brew_caskroom_roots() { printf '%s\n' "$HOME/Caskroom"; }
+_detect_cask_via_caskroom_search TestCaskApp.app
 EOF
 
     [ "$status" -eq 0 ]
@@ -729,7 +782,8 @@ case "$SCENARIO" in
     unrelated) rm "$match"; ln -s "$FIXTURE/other/Rebased.app" "$match" ;;
     copied) rm "$match"; mkdir "$match" ;;
 esac
-find() { printf '%s\n' "$FIXTURE/cask/Rebased.app"; }
+_mole_brew_caskroom_roots() { printf '%s\n' "$FIXTURE/cask"; }
+find() { printf '%s\0' "$FIXTURE/cask/Rebased.app"; }
 # Production token parsing has independent coverage; fixture paths must not
 # create or change the machine's actual Caskroom.
 _extract_cask_token_from_path() { printf '%s\n' rebased; }
@@ -790,4 +844,78 @@ SCRIPT
     run_caskroom_info_failure_case cancelled
     [ "$status" -eq 0 ]
     [ "$output" = 'rc=143 token=' ]
+}
+
+
+@test "batch brew inspection shares inventories but final installed probe is fresh" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+fixture=$(mktemp -d "$HOME/inventory.XXXXXX")
+mkdir -p "$fixture/Owned.app" "$fixture/Other.app"
+selected_apps=(one two)
+is_homebrew_available() { return 0; }
+_mole_brew_caskroom_roots() { printf '%s\n' "$fixture"; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == find ]]; then
+        printf 'scan\n' >> "$fixture/scan-calls"
+        printf '%s\0' /opt/homebrew/Caskroom/owned/1/Owned.app /opt/homebrew/Caskroom/other/1/Other.app
+    else
+        "$@"
+    fi
+}
+_mole_brew_probe() {
+    shift
+    case "$*" in
+        'list --cask') printf 'list\n' >> "$fixture/list-calls"; printf '%s\n' owned other ;;
+        'info --cask owned') printf '%s\n' "$fixture/Owned.app" ;;
+        'info --cask other') printf '%s\n' "$fixture/Other.app" ;;
+        *) return 97 ;;
+    esac
+}
+_batch_scan_app_details_impl() {
+    first=$(_detect_cask_via_caskroom_search Owned.app "$fixture/Owned.app") || exit 1
+    second=$(_detect_cask_via_caskroom_search Other.app "$fixture/Other.app") || exit 1
+    [[ "$first" == owned && "$second" == other ]] || exit 1
+}
+_batch_scan_app_details || exit 1
+[[ $(wc -l < "$fixture/list-calls") -eq 1 ]] || exit 1
+[[ $(wc -l < "$fixture/scan-calls") -eq 1 ]] || exit 1
+[[ -z "${_MOLE_BREW_BATCH_LIST_READY:-}" ]] || exit 1
+[[ -z "${_MOLE_BREW_BATCH_ROOM_FILE:-}" ]] || exit 1
+is_brew_cask_installed owned || exit 1
+[[ $(wc -l < "$fixture/list-calls") -eq 2 ]] || exit 1
+printf 'shared-inspection fresh-execution\n'
+EOF
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"shared-inspection fresh-execution"* ]]
+}
+
+@test "failed batch inventory never feeds partial candidates to brew ownership" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+fixture=$(mktemp -d "$HOME/partial-inventory.XXXXXX")
+mkdir -p "$fixture/Owned.app"
+selected_apps=(one two)
+is_homebrew_available() { return 0; }
+_mole_brew_caskroom_roots() { printf '%s\n' "$fixture"; }
+run_with_timeout() { printf '%s\0' /opt/homebrew/Caskroom/owned/1/Owned.app; return 124; }
+_mole_brew_probe() {
+    shift
+    [[ "$*" == 'list --cask' ]] || { echo unexpected-info; return 97; }
+    printf 'owned\n'
+}
+_batch_scan_app_details_impl() {
+    local rc=0
+    _detect_cask_via_caskroom_search Owned.app "$fixture/Owned.app" || rc=$?
+    [[ $rc -eq 124 ]] || return 1
+    printf 'partial-kept\n'
+}
+_batch_scan_app_details || exit 1
+EOF
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"partial-kept"* ]] || return 1
+    [[ "$output" != *"unexpected-info"* ]]
 }

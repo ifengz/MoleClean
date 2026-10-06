@@ -583,6 +583,156 @@ EOF
     [[ "$output" != *"SAFE_CLEAN:Gradle workers"* ]]
 }
 
+@test "clean_dev_jvm discards an incomplete candidate listing (#1674)" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/jvm-incomplete.XXXXXX")
+    mkdir -p "$fixture_home/.gradle/caches/build-cache-1" "$fixture_home/.gradle/notifications"
+    touch "$fixture_home/.gradle/caches/build-cache-1/entry" "$fixture_home/.gradle/notifications/entry"
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+run_with_timeout() {
+    printf 'BOUNDED_LISTING\n' >&3
+    printf '%s\0' "$HOME/.gradle/caches/build-cache-1/entry"
+    return 124
+}
+gradle_daemon_running() { printf 'UNEXPECTED_PROBE\n'; return 1; }
+safe_clean() { printf 'UNEXPECTED_CLEAN\n'; }
+clean_dev_jvm 3> "$HOME/listing.trace"
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" != *"UNEXPECTED_PROBE"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]] || return 1
+    [ "$(cat "$fixture_home/listing.trace")" = BOUNDED_LISTING ] || return 1
+    [ -f "$fixture_home/.gradle/caches/build-cache-1/entry" ]
+}
+
+@test "clean_dev_jvm bounds a slow producer and discards partial targets (#1674)" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/jvm-slow.XXXXXX")
+    mkdir -p "$fixture_home/.gradle/caches/build-cache-1" "$fixture_home/bin"
+    touch "$fixture_home/.gradle/caches/build-cache-1/entry"
+    cat > "$fixture_home/bin/find" <<'SCRIPT'
+#!/bin/bash
+printf 'FIND_STARTED\n' >> "$HOME/listing.trace"
+printf '%s\0' "$HOME/.gradle/caches/build-cache-1"
+sleep 5
+SCRIPT
+    chmod +x "$fixture_home/bin/find"
+    run env HOME="$fixture_home" PATH="$fixture_home/bin:$PATH" PROJECT_ROOT="$PROJECT_ROOT" \
+        MOLE_TIMEOUT_HINT_SCAN_SEC=2 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+SECONDS=0
+gradle_daemon_running() { printf 'UNEXPECTED_PROBE\n'; return 1; }
+safe_clean() { printf 'UNEXPECTED_CLEAN\n'; }
+clean_dev_jvm
+printf 'ELAPSED:%s\n' "$SECONDS"
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(cat "$fixture_home/listing.trace")" = FIND_STARTED ] || return 1
+    [[ "$output" != *"UNEXPECTED_PROBE"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]] || return 1
+    local elapsed="${output##*ELAPSED:}"
+    [ "$elapsed" -lt 5 ]
+}
+
+@test "clean_dev_jvm propagates a listing signal before later cleanup (#1674)" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/jvm-signal.XXXXXX")
+    mkdir -p "$fixture_home/.gradle/notifications"
+    touch "$fixture_home/.gradle/notifications/entry"
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+run_with_timeout() { printf 'SIGNALLED\n' >&3; return 130; }
+gradle_daemon_running() { return 1; }
+safe_clean() { printf 'UNEXPECTED_CLEAN\n'; }
+clean_dev_jvm 3> "$HOME/listing.trace"
+printf 'UNEXPECTED_LATER_STEP\n'
+EOF
+    [ "$status" -eq 130 ] || { echo "$output"; return 1; }
+    [ "$(cat "$fixture_home/listing.trace")" = SIGNALLED ] || return 1
+    [[ "$output" != *"UNEXPECTED_CLEAN"* ]] || return 1
+    [[ "$output" != *"UNEXPECTED_LATER_STEP"* ]]
+}
+
+@test "clean_dev_jvm listing keeps hidden and dependency entries out of cleanup (#1674)" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/jvm-listing.XXXXXX")
+    mkdir -p "$fixture_home/.gradle/caches/build-cache-1" "$fixture_home/.gradle/caches/modules-2" "$fixture_home/.gradle/daemon/8.14"
+    touch "$fixture_home/.gradle/caches/build-cache-1/entry" "$fixture_home/.gradle/caches/build-cache-1/.hidden" "$fixture_home/.gradle/caches/modules-2/keep"
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+WHITELIST_PATTERNS=()
+gradle_daemon_running() { return 1; }
+safe_clean() { printf 'TARGET:%s\n' "$@"; }
+clean_dev_jvm
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"TARGET:$fixture_home/.gradle/caches/build-cache-1/entry"* ]] || return 1
+    [[ "$output" == *"TARGET:$fixture_home/.gradle/daemon/8.14"* ]] || return 1
+    [[ "$output" != *".hidden"* ]] || return 1
+    [[ "$output" != *"modules-2"* ]]
+}
+
+@test "clean_dev_jvm spends a slow build cache filter on that group only (#1674)" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/jvm-budget.XXXXXX")
+    mkdir -p "$fixture_home/.gradle/caches/build-cache-1" "$fixture_home/.gradle/notifications"
+    touch "$fixture_home/.gradle/caches/build-cache-1/entry-1" "$fixture_home/.gradle/caches/build-cache-1/entry-2" \
+        "$fixture_home/.gradle/notifications/entry"
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+WHITELIST_PATTERNS=()
+SECONDS=0
+# Every build cache entry costs the whole scan budget, as thousands of them do.
+mole_cleanup_targets_exist() {
+    case "$1" in
+        */caches/build-cache-*) SECONDS=$((SECONDS + MOLE_TIMEOUT_HINT_SCAN_SEC)) ;;
+    esac
+    return 0
+}
+gradle_daemon_running() { return 1; }
+safe_clean() { printf 'TARGET:%s\n' "$@"; }
+clean_dev_jvm
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"TARGET:$fixture_home/.gradle/notifications/entry"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"build-cache-1"* ]]
+}
+
+@test "clean_dev_jvm skips the protection probe for whitelisted Gradle entries (#1674)" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/jvm-whitelisted.XXXXXX")
+    mkdir -p "$fixture_home/.gradle/caches/build-cache-1" "$fixture_home/.gradle/notifications"
+    touch "$fixture_home/.gradle/caches/build-cache-1/entry-1" "$fixture_home/.gradle/caches/build-cache-1/entry-2" \
+        "$fixture_home/.gradle/notifications/entry"
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+WHITELIST_PATTERNS=("$HOME/.gradle/caches/*")
+# should_protect_path costs about 10 ms per path, so thousands of whitelisted
+# build cache entries must be settled by the cheap pattern match instead.
+should_protect_path() { printf '%s\n' "$1" >> "$HOME/probes"; return 1; }
+gradle_daemon_running() { return 1; }
+safe_clean() { printf 'TARGET:%s\n' "$@"; }
+clean_dev_jvm
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"TARGET:$fixture_home/.gradle/notifications/entry"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"build-cache-1"* ]] || return 1
+    [ "$(cat "$fixture_home/probes")" = "$fixture_home/.gradle/notifications/entry" ]
+}
+
 @test "clean_dev_jvm fails closed for every Gradle target when the process probe errors" {
     rm -rf "$HOME/.gradle/caches" "$HOME/.gradle/notifications" "$HOME/.gradle/daemon" "$HOME/.gradle/workers"
     mkdir -p "$HOME/.gradle/caches/build-cache-1" "$HOME/.gradle/notifications" "$HOME/.gradle/daemon/8.14" "$HOME/.gradle/workers/worker-1"
@@ -603,6 +753,45 @@ EOF
     }
     [[ "$output" == *"Gradle targets · skipped (process state unknown)"* ]] || return 1
     [[ "$output" != *"SAFE_CLEAN:Gradle"* ]] || return 1
+}
+
+@test "clean_dev_jvm stops its scan spinner before every exit and row" {
+    rm -rf "$HOME/.gradle/caches" "$HOME/.gradle/notifications" "$HOME/.gradle/daemon" "$HOME/.gradle/workers"
+    mkdir -p "$HOME/.gradle/caches/build-cache-1" "$HOME/.gradle/notifications"
+    touch "$HOME/.gradle/caches/build-cache-1/entry" "$HOME/.gradle/notifications/entry" "$HOME/.gradle/notifications/entry2"
+
+    local scenario
+    for scenario in unknown running listing-failed whitelisted budget; do
+        run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" SCENARIO="$scenario" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+spinner=off
+start_section_spinner() { spinner=on; }
+stop_section_spinner() { spinner=off; }
+note_activity() { echo "ROW spinner=$spinner"; }
+mole_defer_cleanup_family() { echo "DEFER spinner=$spinner"; }
+safe_clean() { echo "SAFE_CLEAN spinner=$spinner"; }
+case "$SCENARIO" in
+    unknown) pgrep() { return 2; } ;;
+    running) gradle_daemon_running() { return 0; } ;;
+    listing-failed) run_with_timeout() { return 124; } ;;
+    whitelisted) is_path_whitelisted() { return 0; } ;;
+    # The first entry spends the budget; the second hits the non-build deadline exit.
+    budget) is_path_whitelisted() { SECONDS=$((SECONDS + MOLE_TIMEOUT_HINT_SCAN_SEC + 1)); return 1; } ;;
+esac
+clean_dev_jvm
+echo "RETURN spinner=$spinner"
+EOF
+        [ "$status" -eq 0 ] || { echo "$scenario: $output"; return 1; }
+        [[ "$output" == *"RETURN spinner=off"* ]] || { echo "$scenario: $output"; return 1; }
+        [[ "$output" != *"spinner=on"* ]] || { echo "$scenario: $output"; return 1; }
+        case "$scenario" in
+            unknown) [[ "$output" == *"ROW spinner=off"* ]] || { echo "$scenario: $output"; return 1; } ;;
+            running) [[ "$output" == *"DEFER spinner=off"* ]] || { echo "$scenario: $output"; return 1; } ;;
+            *) [[ "$output" != *"SAFE_CLEAN"* ]] || { echo "$scenario: $output"; return 1; } ;;
+        esac
+    done
 }
 
 @test "clean_dev_jvm defers every Gradle target while Gradle is running" {
@@ -3458,7 +3647,14 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/dev.sh"
-run_with_timeout() { shift; "$@"; }
+run_with_timeout() {
+    shift
+    # Only the synthetic HOME install belongs to this fixture.
+    if [[ "$1" == "/usr/libexec/PlistBuddy" && "${4:-}" == "/Applications/Codex.app/Contents/Info.plist" ]]; then
+        return 1
+    fi
+    "$@"
+}
 mkdir -p "$HOME/Applications/Codex.app/Contents"
 cat > "$HOME/Applications/Codex.app/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

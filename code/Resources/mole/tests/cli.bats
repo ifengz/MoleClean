@@ -117,6 +117,42 @@ setup() {
 	[[ "$output" != *"mo optimise"* ]]
 }
 
+@test "mole refuses a deleted cwd before loading user state (#1679)" {
+	local vanished
+	vanished=$(mktemp -d "$HOME/cwd-gone.XXXXXX")
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" VANISHED="$vanished" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+cd "$VANISHED"
+rmdir "$VANISHED"
+exec "$PROJECT_ROOT/mole" clean --dry-run --debug
+EOF
+	[ "$status" -eq 1 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"Cannot access the current directory"* ]] || return 1
+	[[ "$output" == *'cd ~'* ]] || return 1
+	[[ "$output" != *"Starting developer cleanup step"* ]] || return 1
+	[[ "$output" != *"Debug logging enabled"* ]]
+}
+
+@test "mole still answers version and help probes from a deleted cwd (#1679)" {
+	local vanished
+	vanished=$(mktemp -d "$HOME/cwd-probe.XXXXXX")
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" VANISHED="$vanished" /bin/bash --noprofile --norc <<'EOF'
+set -uo pipefail
+cd "$VANISHED"
+rmdir "$VANISHED"
+# install.sh and mo update verify a fresh install with these two probes.
+"$PROJECT_ROOT/mole" --version > "$HOME/probe-version.out" 2>&1; echo "VERSION_RC=$?"
+"$PROJECT_ROOT/mole" --help > "$HOME/probe-help.out" 2>&1; echo "HELP_RC=$?"
+"$PROJECT_ROOT/mole" clean --dry-run > /dev/null 2>&1; echo "CLEAN_RC=$?"
+EOF
+	[[ "$output" == *"VERSION_RC=0"* ]] || { echo "$output"; cat "$HOME/probe-version.out"; return 1; }
+	[[ "$output" == *"HELP_RC=0"* ]] || { echo "$output"; cat "$HOME/probe-help.out"; return 1; }
+	# Every other command keeps refusing an unknown working directory.
+	[[ "$output" == *"CLEAN_RC=1"* ]] || { echo "$output"; return 1; }
+	grep -q 'Mole version' "$HOME/probe-version.out" || return 1
+	! grep -q 'Cannot access the current directory' "$HOME/probe-version.out" || return 1
+}
+
 @test "mole --version reports script version" {
 	expected_version="$(grep '^VERSION=' "$PROJECT_ROOT/mole" | head -1 | sed 's/VERSION=\"\(.*\)\"/\1/')"
 	run env HOME="$HOME" "$PROJECT_ROOT/mole" --version
@@ -364,7 +400,9 @@ fake_root="$HOME/fake-mole"
 mkdir -p "$fake_root/bin"
 cat > "$fake_root/bin/uninstall.sh" <<'SCRIPT'
 #!/usr/bin/env bash
-if IFS= read -r -s -n1 -t 0.1 key; then
+# Use an integer timeout: macOS Bash 3.2 rejects fractional values, which
+# would report NO_LEAK without checking whether Enter remained on stdin.
+if IFS= read -r -s -n1 -t 1 key; then
     if [[ -z "$key" ]]; then
         echo "LEAK:ENTER"
     else
@@ -798,4 +836,10 @@ PY
         run /bin/bash -c "${prefix//\$EUID/501}"
         [ "$status" -eq 0 ] || return 1
     done
+}
+
+@test "main menu restores terminal settings after Q and Ctrl-C" {
+	command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+	run python3 "$PROJECT_ROOT/tests/main_menu_pty.py"
+	[ "$status" -eq 0 ]
 }

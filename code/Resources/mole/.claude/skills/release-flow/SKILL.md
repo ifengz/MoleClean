@@ -22,13 +22,13 @@ At the start of any release-flavored task, restate which channels this run will 
 Resolve the latest published stable tag from GitHub before choosing the version or review range. Reconcile handoff claims against the current branch, worktree, and remote SHA; an earlier report of uncommitted work may describe commits that have already landed. Review all changes since that stable tag, not just the final fix batch.
 
 1. `grep '^VERSION=' mole` matches the new version.
-2. `SECURITY_AUDIT.md` opening line reflects the new version and date.
+2. `SECURITY_AUDIT.md` opening line reflects the new version and date, and its CI coverage list matches the matrix in `.github/workflows/test.yml`.
 3. `git status -s` is empty or only contains intentionally staged release work.
 4. `git log origin/main..HEAD --oneline` shows only commits you intend to ship.
 5. `./scripts/check.sh --format` and `TERM=xterm-256color MOLE_TEST_NO_AUTH=1 MOLE_TEST_JOBS=2 BATS_FORMATTER=tap ./scripts/test.sh` both exit 0.
 6. `go test ./...` and `make build` both pass.
 
-Use the Go version declared in `go.mod` for local release builds, matching `actions/setup-go` in CI, then run `scripts/check_release_minos.sh` on both architectures. A newer local Go can raise the minimum macOS version even with `CGO_ENABLED=0`; during V1.54.0 verification, Go 1.27 produced macOS 13 binaries while the declared Go 1.25 toolchain preserved macOS 12. Rebuild with the declared toolchain instead of relaxing the minimum-OS gate.
+Use the Go version declared in `go.mod` for local release builds, matching `actions/setup-go` in CI, then run `scripts/check_release_minos.sh` on both architectures. A newer local Go can raise the minimum macOS version even with `CGO_ENABLED=0`; during V1.54.0 verification, Go 1.27 produced macOS 13 binaries while the declared Go 1.25 toolchain preserved macOS 12. Rebuild with the declared toolchain instead of relaxing the minimum-OS gate. Check the `make release-amd64 release-arm64` outputs, not `make build`: the local build links `status` with cgo against the host SDK, so its `status-go` reports the host macOS as its minimum and says nothing about the release binaries.
 
 Capture the test runner's exit status and structured summary, with skipped tests reported separately. After pushing the candidate commit, wait for its required Check, Validation, and CodeQL workflows to finish successfully before tagging that exact SHA. A cancelled run or a green check on another commit is not release evidence.
 
